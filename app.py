@@ -175,7 +175,7 @@ else:
 
 if processed_documents is None:
     try:
-        st.info("👈 Please upload PDF, TXT, or MD documents in the sidebar to build the knowledge base.")
+        st.info("Please upload PDF, TXT, or MD documents in the sidebar to build the knowledge base.")
         st.stop()
     except Exception:
         import sys
