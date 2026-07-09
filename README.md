@@ -58,6 +58,48 @@ flowchart TD
 
 ---
 
+## Detailed Architecture Flow
+
+The system operates across four primary pipeline stages, detailed step-by-step below:
+
+### 1. Document Ingestion Phase (Sidebar UI)
+* **File Upload**: The user uploads files (`.pdf`, `.txt`, `.md`) via the Streamlit sidebar.
+* **Extraction**: 
+  * For PDFs: The `pypdf` library reads page-by-page, extracting clean text strings.
+  * For TXT/MD: The file contents are read directly and decoded as `utf-8`.
+* **Document Object Creation**: Raw text snippets are wrapped in LangChain `Document` objects. Metadata including `filename` and `page_label` are attached to enable source attribution.
+* **Persistence**: The extracted list of `Document` objects is serialized and saved to `results/processed_documents.pkl`.
+
+### 2. Startup, Chunking & Vectorization Phase
+* **Pickle Load**: Upon startup or re-run, the app checks for the existence of `results/processed_documents.pkl` and deserializes it.
+* **Text Chunking**: The list of documents is passed to a `RecursiveCharacterTextSplitter` with:
+  * `chunk_size = 500` characters (ensuring context fits nicely within LLM attention windows).
+  * `chunk_overlap = 100` characters (maintaining contextual continuity across chunk boundaries).
+  * Unique IDs are generated and appended to the metadata of each chunk (crucial for deduplication).
+* **Vector Index Creation**:
+  * Local embedding computation is initiated using the `sentence-transformers/all-MiniLM-L6-v2` model (running on the CPU/local hardware).
+  * A `FAISS` vector store index is created from these embedded chunks and cached in memory.
+
+### 3. Multi-Query Retrieval & Cross-Encoder Reranking
+* **Query Input**: The user enters a question in the Streamlit chat box.
+* **Multi-Query Expansion**:
+  * The user's query is passed to the `MultiQueryRetriever`.
+  * The Groq LLM model (`llama-3.3-70b-versatile`) is prompted to generate 5 alternative versions of the question from different perspectives.
+* **Vector Search**: All 5 query variations query the FAISS index (retrieving the top 5 nearest neighbors for each variation).
+* **Recall Optimization & Deduplication**: The resulting sets of document chunks are merged, and duplicates (based on the chunk's unique metadata IDs) are removed to increase retrieval recall.
+* **TinyBERT Reranking**:
+  * The original query and all deduplicated chunks are combined into pairs.
+  * A local Cross-Encoder model (`cross-encoder/ms-marco-TinyBERT-L-2-v2`) calculates a relevance score for each query-chunk pair.
+  * Chunks are sorted by score, and only the **Top 5** highest-scoring chunks are kept. This alleviates "lost-in-the-middle" issues by ensuring the most relevant contexts are prioritized.
+
+### 4. Context Grounding & Response Generation
+* **Context Construction**: The page content of the Top 5 reranked chunks is concatenated into a single cohesive context block.
+* **System Prompt Grounding**: The query and context block are formatted into a system-guided template instructing the LLM to use **only** the provided context and say "I don't know" if the answer cannot be found.
+* **Groq LLM Invocation**: The formatted prompt is sent to `llama-3.3-70b-versatile` via the Groq API.
+* **UI Display**: The generated answer is streamed/printed to the Streamlit chat window. The metadata and content of the source chunks are displayed inside an expandable UI component below the chat bubble.
+
+---
+
 ## Setup & Installation
 
 ### Prerequisites
