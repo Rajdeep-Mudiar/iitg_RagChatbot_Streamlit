@@ -13,3 +13,4 @@ torch
 torchvision
 langchain-classic
 pypdf
+pymupdf

@@ -110,17 +110,51 @@ def get_vectorstore(documents, _embedding_model, _chunker):
     st.success("Vector store created.")
     return vectorstore, chunks
 
+def get_ollama_models():
+    import requests
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            models_data = response.json().get("models", [])
+            return [m["name"] for m in models_data]
+    except Exception:
+        pass
+    return ["llama3.2:1b", "qwen2.5-coder:7b", "gemma3:1b"]
+
 @st.cache_resource
-def create_llm():
-    return ChatGroq(
+def create_llm(fallback_model=None):
+    primary_llm = ChatGroq(
         model=LLM_CONFIG["default_model"],
         temperature=LLM_CONFIG["temperature"],
         max_tokens=LLM_CONFIG["max_tokens"],
         timeout=LLM_CONFIG["timeout"],
         max_retries=LLM_CONFIG["max_retries"]
     )
+    if fallback_model:
+        from langchain_community.llms import Ollama
+        fallback_llm = Ollama(
+            model=fallback_model,
+            temperature=LLM_CONFIG["temperature"]
+        )
+        return primary_llm.with_fallbacks([fallback_llm])
+    return primary_llm
 
 # --- Pipeline Setup ---
+
+# Sidebar LLM Settings
+st.sidebar.title("LLM Settings")
+enable_fallback = st.sidebar.checkbox("Enable Local Fallback", value=True, help="Use local Ollama model if Groq API fails")
+fallback_model = None
+if enable_fallback:
+    ollama_models = get_ollama_models()
+    default_index = 0
+    for idx, model in enumerate(ollama_models):
+        if "llama3.2:1b" in model or "gemma3:1b" in model:
+            default_index = idx
+            break
+    fallback_model = st.sidebar.selectbox("Select Fallback Model", options=ollama_models, index=default_index)
+
+st.sidebar.markdown("---")
 
 # Sidebar Document Ingestion / Status
 st.sidebar.title("Document Management")
@@ -146,10 +180,11 @@ else:
             for uploaded_file in uploaded_files:
                 filename = uploaded_file.name
                 if filename.endswith(".pdf"):
-                    import pypdf
-                    reader = pypdf.PdfReader(uploaded_file)
-                    for page_idx, page in enumerate(reader.pages):
-                        text = page.extract_text()
+                    import fitz
+                    file_bytes = uploaded_file.read()
+                    doc = fitz.open(stream=file_bytes, filetype="pdf")
+                    for page_idx, page in enumerate(doc):
+                        text = page.get_text("text")
                         if text and text.strip():
                             all_docs.append(Document(
                                 page_content=text,
@@ -190,10 +225,31 @@ recursive_chunker = create_recursive_chunker(CHUNK_CONFIG)
 # Create Vectorstore
 vectorstore, all_chunks = get_vectorstore(processed_documents, embedding_model, recursive_chunker)
 
+# Optimized MultiQuery Prompt template for technical/mathematical QA
+from langchain_core.prompts import PromptTemplate
+
+QUERY_PROMPT = PromptTemplate(
+    input_variables=["question"],
+    template="""You are an AI assistant task solver and expert research assistant.
+Your task is to analyze the user's input question and generate 3 different versions of the query.
+These search queries should target different perspectives, sub-questions, terminology variations, abbreviations, or physical/mathematical formulations of the original question.
+For instance:
+- If the question contains acronyms or jargon, expand them to their full terms.
+- If it involves math formulas or derivations, write the equations/formulas using standard symbols or describe them in clear text.
+- If the query is complex, break it down into simpler search terms.
+By generating multiple perspectives on the user query, your goal is to help the user retrieve the most relevant documents.
+
+Original question: {question}
+
+Provide these alternative queries separated by newlines. Do not add numbering, prefixes, introductory or concluding remarks. Just output the 3 alternative queries.
+"""
+)
+
 # Create MultiQuery Retriever
 multi_query_retriever = MultiQueryRetriever.from_llm(
     retriever=vectorstore.as_retriever(search_kwargs={"k": 5}), # Base retriever for MultiQuery
-    llm=create_llm()
+    llm=create_llm(fallback_model),
+    prompt=QUERY_PROMPT
 )
 
 # Create TinyBERT Reranker
@@ -206,13 +262,19 @@ RAG_PROMPT = ChatPromptTemplate.from_template(
     Use ONLY the context below to answer the question.
     If the answer is not found in the context, say you don't know.
 
+    Formatting Instructions:
+    - If your answer includes mathematical formulas, equations, symbols, or derivations, ALWAYS format them using LaTeX. Use double dollar signs `$$` for block equations (e.g. $$E = mc^2$$) and single dollar signs `$` for inline equations (e.g. $E = mc^2$).
+    - If your answer includes code, programming blocks, or scripts, ALWAYS format them using markdown code block syntax with the appropriate language identifier (e.g. ```python ... ```).
+
     Context
     -------
     {context}
 
-    Question
-    --------
-    {question}
+    Conversation History
+    --------------------
+    {chat_history}
+
+    Question: {question}
 
     Answer:
     """
@@ -220,13 +282,61 @@ RAG_PROMPT = ChatPromptTemplate.from_template(
 
 # --- RAG Chain Function ---
 
-def get_rag_response(question, llm, retriever, reranker):
-    # 1. Retrieve documents using MultiQuery
-    retrieved_docs_multiquery = retriever.invoke(question)
+def condense_question(chat_history, question, llm):
+    if not chat_history:
+        return question, False
     
-    # 2. Rerank retrieved documents using TinyBERT
+    # Format chat history as a string
+    history_str = ""
+    for msg in chat_history[-5:]: # Keep last 5 messages for context
+        role = "User" if msg["role"] == "user" else "Assistant"
+        history_str += f"{role}: {msg['content']}\n"
+        
+    condense_prompt = f"""You are an expert conversational analyzer. Your task is to analyze the conversation history and the follow-up question, then determine if the follow-up question is contextual (meaning it depends on the context of previous messages, references past topics, or uses pronouns like "it", "they", "this", "its", "that") or if it is a standalone/independent question.
+
+Instructions:
+1. If the question is contextual, you MUST rewrite it to be a fully independent standalone question. Replace all pronouns (like "it", "its", "this", "they", "their") or vague references with the actual names, concepts, equations, or protocols mentioned in the conversation history (e.g., if the history is about "BBM92 protocol" and the question is "How secure is it?", rewrite it to "How secure is the BBM92 protocol?"). Do NOT leave any pronouns unresolved.
+2. If the question is already independent and does not refer to anything in the history, output the follow-up question exactly as-is.
+
+Your output must be in the following exact format, with no other text, markdown, or explanation:
+Is Contextual: <True/False>
+Question: <the reformulated or original question>
+
+Conversation History:
+{history_str}
+
+Follow-up Question: {question}
+"""
+
+    try:
+        response = llm.invoke(condense_prompt)
+        text = response.content.strip()
+        is_contextual = False
+        standalone_q = question
+        
+        # Parse the output, cleaning up any markdown symbols like asterisks
+        for line in text.split("\n"):
+            cleaned_line = line.replace("*", "").strip()
+            if cleaned_line.startswith("Is Contextual:"):
+                is_contextual = "true" in cleaned_line.lower()
+            elif cleaned_line.startswith("Question:"):
+                standalone_q = cleaned_line.split("Question:", 1)[1].strip()
+                
+        return standalone_q, is_contextual
+    except Exception:
+        pass
+    return question, False
+
+def get_rag_response(question, chat_history, llm, retriever, reranker):
+    # 1. Condense the question using chat history
+    standalone_question, is_contextual = condense_question(chat_history, question, llm)
+    
+    # 2. Retrieve documents using MultiQuery with standalone question
+    retrieved_docs_multiquery = retriever.invoke(standalone_question)
+    
+    # 3. Rerank retrieved documents using TinyBERT
     pairs = [
-        (question, doc.page_content)
+        (standalone_question, doc.page_content)
         for doc in retrieved_docs_multiquery
     ]
     scores = reranker.predict(
@@ -250,11 +360,19 @@ def get_rag_response(question, llm, retriever, reranker):
         ]
     )
 
-    # 3. Generate answer using LLM
+    # Format history for prompt ONLY if it is contextual
+    history_str = ""
+    if is_contextual:
+        for msg in chat_history[-5:]:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            history_str += f"{role}: {msg['content']}\n"
+
+    # 4. Generate answer using LLM
     rag_chain = RAG_PROMPT | llm | StrOutputParser()
     answer = rag_chain.invoke({
         "context": context,
-        "question": question
+        "chat_history": history_str,
+        "question": standalone_question
     })
     return answer, top_k_reranked_docs
 
@@ -274,8 +392,8 @@ if prompt := st.chat_input("Ask a question about the documents..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Generating response..."):
-            llm_instance = create_llm() # Create LLM instance for each request to avoid caching issues
-            response, retrieved_reranked_docs = get_rag_response(prompt, llm_instance, multi_query_retriever, tinybert_reranker)
+            llm_instance = create_llm(fallback_model) # Create LLM instance for each request to avoid caching issues
+            response, retrieved_reranked_docs = get_rag_response(prompt, st.session_state.messages[:-1], llm_instance, multi_query_retriever, tinybert_reranker)
             st.markdown(response)
             
             with st.expander("Retrieved Documents (Reranked Top 5)"):

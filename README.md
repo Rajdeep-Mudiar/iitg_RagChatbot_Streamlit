@@ -14,7 +14,7 @@ The diagram below illustrates the detailed architecture of the document ingestio
 flowchart TD
     subgraph Ingestion["1. Document Ingestion Pipeline"]
         A[User Uploads PDF / TXT / MD] --> B[Parse File Content]
-        B --> C[Page-level / File-level Documents]
+        B -->|PDF via PyMuPDF/fitz| C[Page-level / File-level Documents]
         C --> D[Save to results/processed_documents.pkl]
     end
 
@@ -22,12 +22,13 @@ flowchart TD
         D --> E[Load processed_documents.pkl]
         E --> F[Initialize HuggingFace Embeddings<br/>sentence-transformers/all-MiniLM-L6-v2]
         F --> G[Initialize RecursiveCharacterTextSplitter<br/>chunk_size: 500, overlap: 100]
-        G --> H[Create / Load FAISS Vector Store]
+        G --> H[Create / Load FAISS Vector Store & Add Chunk IDs]
     end
 
     subgraph RAGPipeline["3. Query & Retrieval Pipeline"]
-        I[User Query] --> J[MultiQueryRetriever]
-        J --> K[LLM: Llama-3.3-70b-versatile<br/>Generates 5 query variations]
+        I[User Query + Chat History] --> Condense[Query Condensation LLM Step<br/>Resolves pronouns & reformulates to standalone query]
+        Condense --> J[MultiQueryRetriever]
+        J --> K[LLM: Llama-3.3-70b-versatile<br/>Generates 3 query variations]
         K --> L[Retrieve Top Documents for all variations from FAISS]
         L --> M[Union & Deduplicate Retrieved Documents]
         M --> N[TinyBERT Cross-Encoder Reranker<br/>cross-encoder/ms-marco-TinyBERT-L-2-v2]
@@ -36,8 +37,8 @@ flowchart TD
     end
 
     subgraph Generation["4. LLM Generation"]
-        P --> Q[Construct Prompt with Context]
-        Q --> R[LLM: Llama-3.3-70b-versatile]
+        P --> Q[Construct Prompt with Context + LaTeX/Code rules]
+        Q --> R[LLM: Llama-3.3-70b-versatile<br/>with Ollama Fallback]
         R --> S[Generate Answer]
         S --> T[Render Answer & Expandable Source Contexts]
     end
@@ -45,16 +46,20 @@ flowchart TD
 
 ---
 
-## Core Components & Technologies
+## Tech Stack & Core Components
 
-1. **User Interface**: [Streamlit](https://streamlit.io/) provides a clean chat interface along with a sidebar panel for managing and ingesting documents.
-2. **Ingestion & Parsing**: `pypdf` extracts text from uploaded PDF documents on the fly.
-3. **Chunking**: `RecursiveCharacterTextSplitter` segments text into manageable chunks of `500` characters with `100` characters overlap.
-4. **Embeddings**: `HuggingFaceEmbeddings` loads `sentence-transformers/all-MiniLM-L6-v2` locally for semantic vector generation.
-5. **Vector Database**: `FAISS` (Facebook AI Similarity Search) manages the index for efficient similarity searches.
-6. **Multi-Query Retrieval**: A `MultiQueryRetriever` uses the Groq LLM to write 5 alternative formulations of the user's query, broadening the scope of search and boosting retrieval recall.
-7. **Reranker**: A local `CrossEncoder` using `cross-encoder/ms-marco-TinyBERT-L-2-v2` reranks the combined retrieved documents based on exact query compatibility, mitigating "lost in the middle" effects.
-8. **Generation Model**: `ChatGroq` interfaces with the high-performance `llama-3.3-70b-versatile` model to generate context-grounded answers.
+- **Chunker**: `RecursiveCharacterTextSplitter` (from `langchain_text_splitters`)
+  - **Configuration**: `chunk_size = 500` characters, `chunk_overlap = 100` characters.
+  - **Separators**: `["\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", ""]` (maintains semantic cohesion).
+- **Embedding Model**: `sentence-transformers/all-MiniLM-L6-v2` (loaded locally via LangChain's `HuggingFaceEmbeddings` on CPU).
+- **Vector Database**: `FAISS` (Facebook AI Similarity Search) manages the index for fast local vector retrieval.
+- **Reranker**: `cross-encoder/ms-marco-TinyBERT-L-2-v2` (loaded locally via `sentence_transformers.CrossEncoder`, keeping top **5** context chunks).
+- **LLM Model**:
+  - **Primary**: `llama-3.3-70b-versatile` (hosted via the Groq API).
+  - **Local Fallback**: Local Ollama instances (e.g., `llama3.2:1b`, `gemma3:1b`, or `qwen2.5-coder:7b`) are automatically selected if the primary API fails.
+- **Query Optimization Techniques**:
+  1. **Contextual Query Condensation / Reformulation**: A custom LLM prompt analyzes the conversation history and the follow-up question. If pronouns (like "it", "they", "this") or vague references are found, it reformulates the prompt into a standalone question.
+  2. **Multi-Query Retrieval (Query Expansion)**: A custom prompt template forces the LLM to write **3 alternative formulations** targeting different perspectives, expansion of abbreviations/jargon, mathematical equations, and simplified sub-queries, which are then queried in parallel against FAISS to boost retrieval recall.
 
 ---
 
@@ -65,7 +70,7 @@ The system operates across four primary pipeline stages, detailed step-by-step b
 ### 1. Document Ingestion Phase (Sidebar UI)
 * **File Upload**: The user uploads files (`.pdf`, `.txt`, `.md`) via the Streamlit sidebar.
 * **Extraction**: 
-  * For PDFs: The `pypdf` library reads page-by-page, extracting clean text strings.
+  * For PDFs: The `PyMuPDF` (`fitz`) library reads page-by-page, extracting clean text strings.
   * For TXT/MD: The file contents are read directly and decoded as `utf-8`.
 * **Document Object Creation**: Raw text snippets are wrapped in LangChain `Document` objects. Metadata including `filename` and `page_label` are attached to enable source attribution.
 * **Persistence**: The extracted list of `Document` objects is serialized and saved to `results/processed_documents.pkl`.
@@ -75,27 +80,28 @@ The system operates across four primary pipeline stages, detailed step-by-step b
 * **Text Chunking**: The list of documents is passed to a `RecursiveCharacterTextSplitter` with:
   * `chunk_size = 500` characters (ensuring context fits nicely within LLM attention windows).
   * `chunk_overlap = 100` characters (maintaining contextual continuity across chunk boundaries).
-  * Unique IDs are generated and appended to the metadata of each chunk (crucial for deduplication).
+  * Unique IDs (`chunk_id`) are generated and appended to the metadata of each chunk (crucial for deduplication).
 * **Vector Index Creation**:
-  * Local embedding computation is initiated using the `sentence-transformers/all-MiniLM-L6-v2` model (running on the CPU/local hardware).
+  * Local embedding computation is initiated using the `sentence-transformers/all-MiniLM-L6-v2` model.
   * A `FAISS` vector store index is created from these embedded chunks and cached in memory.
 
 ### 3. Multi-Query Retrieval & Cross-Encoder Reranking
 * **Query Input**: The user enters a question in the Streamlit chat box.
+* **Query Condensation**: The conversation history and user query are analyzed by the LLM. If the query is contextual, it is reformulated into a standalone query.
 * **Multi-Query Expansion**:
-  * The user's query is passed to the `MultiQueryRetriever`.
-  * The Groq LLM model (`llama-3.3-70b-versatile`) is prompted to generate 5 alternative versions of the question from different perspectives.
-* **Vector Search**: All 5 query variations query the FAISS index (retrieving the top 5 nearest neighbors for each variation).
-* **Recall Optimization & Deduplication**: The resulting sets of document chunks are merged, and duplicates (based on the chunk's unique metadata IDs) are removed to increase retrieval recall.
+  * The standalone query is passed to the `MultiQueryRetriever`.
+  * The LLM is prompted with a custom instruction to generate **3 alternative queries** targeting different perspectives, terminologies, and formulations.
+* **Vector Search**: All 3 query variations query the FAISS index (retrieving the top 5 nearest neighbors for each variation).
+* **Recall Optimization & Deduplication**: The resulting sets of document chunks are merged, and duplicates (based on the chunk's unique `chunk_id` metadata) are removed to increase retrieval recall.
 * **TinyBERT Reranking**:
-  * The original query and all deduplicated chunks are combined into pairs.
+  * The standalone query and all deduplicated chunks are combined into pairs.
   * A local Cross-Encoder model (`cross-encoder/ms-marco-TinyBERT-L-2-v2`) calculates a relevance score for each query-chunk pair.
   * Chunks are sorted by score, and only the **Top 5** highest-scoring chunks are kept. This alleviates "lost-in-the-middle" issues by ensuring the most relevant contexts are prioritized.
 
 ### 4. Context Grounding & Response Generation
 * **Context Construction**: The page content of the Top 5 reranked chunks is concatenated into a single cohesive context block.
-* **System Prompt Grounding**: The query and context block are formatted into a system-guided template instructing the LLM to use **only** the provided context and say "I don't know" if the answer cannot be found.
-* **Groq LLM Invocation**: The formatted prompt is sent to `llama-3.3-70b-versatile` via the Groq API.
+* **System Prompt Grounding**: The query and context block are formatted into a system-guided template instructing the LLM to use **only** the provided context and say "I don't know" if the answer cannot be found. Custom rules enforce formatting math in LaTeX (`$`/`$$`) and code in markdown blocks.
+* **LLM Invocation**: The formatted prompt is sent to `llama-3.3-70b-versatile` (or the local fallback model via Ollama if the Groq API fails).
 * **UI Display**: The generated answer is streamed/printed to the Streamlit chat window. The metadata and content of the source chunks are displayed inside an expandable UI component below the chat bubble.
 
 ---
