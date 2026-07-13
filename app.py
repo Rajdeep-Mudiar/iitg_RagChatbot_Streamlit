@@ -245,13 +245,6 @@ Provide these alternative queries separated by newlines. Do not add numbering, p
 """
 )
 
-# Create MultiQuery Retriever
-multi_query_retriever = MultiQueryRetriever.from_llm(
-    retriever=vectorstore.as_retriever(search_kwargs={"k": 5}), # Base retriever for MultiQuery
-    llm=create_llm(fallback_model),
-    prompt=QUERY_PROMPT
-)
-
 # Create TinyBERT Reranker
 tinybert_reranker = create_reranker(RERANK_CONFIG["default_model"])
 
@@ -310,28 +303,43 @@ Follow-up Question: {question}
 
     try:
         response = llm.invoke(condense_prompt)
-        text = response.content.strip()
+        text = response.content.strip() if hasattr(response, "content") else str(response).strip()
         is_contextual = False
         standalone_q = question
         
-        # Parse the output, cleaning up any markdown symbols like asterisks
-        for line in text.split("\n"):
-            cleaned_line = line.replace("*", "").strip()
-            if cleaned_line.startswith("Is Contextual:"):
-                is_contextual = "true" in cleaned_line.lower()
-            elif cleaned_line.startswith("Question:"):
-                standalone_q = cleaned_line.split("Question:", 1)[1].strip()
+        # Robust parsing of the output to handle varying LLM formats/markups/bullets
+        has_labels = "is contextual" in text.lower() or "question:" in text.lower()
+        if has_labels:
+            for line in text.split("\n"):
+                # Clean prefix bullet points, numbers, and common markdown syntax
+                cleaned_line = re.sub(r"^[-*\d.\s#]+", "", line).strip()
+                cleaned_line = cleaned_line.replace("*", "").replace("`", "").strip()
                 
+                if re.match(r"^Is\s+Contextual\s*:", cleaned_line, re.IGNORECASE):
+                    val = re.sub(r"^Is\s+Contextual\s*:\s*", "", cleaned_line, flags=re.IGNORECASE).strip().lower()
+                    is_contextual = "true" in val
+                elif re.match(r"^Question\s*:", cleaned_line, re.IGNORECASE):
+                    standalone_q = re.sub(r"^Question\s*:\s*", "", cleaned_line, flags=re.IGNORECASE).strip()
+        else:
+            # Fallback if the LLM output doesn't use the format labels at all
+            standalone_q = text.replace("*", "").replace("`", "").strip()
+            is_contextual = standalone_q.lower() != question.lower()
+            
         return standalone_q, is_contextual
     except Exception:
         pass
     return question, False
 
-def get_rag_response(question, chat_history, llm, retriever, reranker):
+def get_rag_response(question, chat_history, llm, vectorstore, reranker):
     # 1. Condense the question using chat history
     standalone_question, is_contextual = condense_question(chat_history, question, llm)
     
-    # 2. Retrieve documents using MultiQuery with standalone question
+    # 2. Retrieve documents using MultiQuery with standalone question (created dynamically with current llm)
+    retriever = MultiQueryRetriever.from_llm(
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),
+        llm=llm,
+        prompt=QUERY_PROMPT
+    )
     retrieved_docs_multiquery = retriever.invoke(standalone_question)
     
     # 3. Rerank retrieved documents using TinyBERT
@@ -393,7 +401,7 @@ if prompt := st.chat_input("Ask a question about the documents..."):
     with st.chat_message("assistant"):
         with st.spinner("Generating response..."):
             llm_instance = create_llm(fallback_model) # Create LLM instance for each request to avoid caching issues
-            response, retrieved_reranked_docs = get_rag_response(prompt, st.session_state.messages[:-1], llm_instance, multi_query_retriever, tinybert_reranker)
+            response, retrieved_reranked_docs = get_rag_response(prompt, st.session_state.messages[:-1], llm_instance, vectorstore, tinybert_reranker)
             st.markdown(response)
             
             with st.expander("Retrieved Documents (Reranked Top 5)"):
