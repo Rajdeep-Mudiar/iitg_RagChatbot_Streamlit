@@ -1,413 +1,2150 @@
-import streamlit as st
 import os
+import re
+import json
 import pickle
 import time
-import re
+import requests
+
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from dotenv import load_dotenv
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
+
 from langchain_community.vectorstores import FAISS
+
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_classic.retrievers.multi_query import MultiQueryRetriever
-from sentence_transformers import CrossEncoder
+from langchain_ollama import OllamaLLM
+
 from langchain_core.documents import Document
+from langchain_core.prompts import (
+    ChatPromptTemplate,
+    PromptTemplate
+)
+from langchain_core.output_parsers import StrOutputParser
 
-# Configuration from the notebook (simplified for app.py)
-LLM_CONFIG = {
-    "default_model": "llama-3.3-70b-versatile",
-    "temperature": 0,
-    "max_tokens": 1024,
-    "timeout": None,
-    "max_retries": 2
-}
+from langchain_classic.retrievers.multi_query import MultiQueryRetriever
 
-EMBEDDING_CONFIG = {
-    "default_model": "sentence-transformers/all-MiniLM-L6-v2",
-    "normalize_embeddings": True,
-    "device": "cpu",
-    "batch_size": 32,
-    "cache_folder": "./cache/embeddings"
-}
+from sentence_transformers import CrossEncoder
 
-CHUNK_CONFIG = {
-    "chunk_size": 500,
-    "chunk_overlap": 100,
-    "separators": ["\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", ""]
-}
 
-RERANK_CONFIG = {
-    "default_model": "cross-encoder/ms-marco-TinyBERT-L-2-v2",
-    "top_k": 5,
-    "batch_size": 16
-}
+# ============================================================
+# LOAD ENVIRONMENT
+# ============================================================
 
-# Streamlit UI
-st.set_page_config(page_title="RAG Chatbot", page_icon=":robot:")
-st.title(":robot: RAG Chatbot")
-
-# Load environment variables
-from dotenv import load_dotenv
 load_dotenv()
 
-# Check for GROQ_API_KEY
-if "GROQ_API_KEY" not in os.environ:
-    st.error("GROQ_API_KEY not found. Please set it in your environment variables.")
+
+# ============================================================
+# LANGSMITH CONFIGURATION
+# ============================================================
+
+LANGSMITH_TRACING = os.getenv(
+    "LANGSMITH_TRACING",
+    "false"
+)
+
+LANGSMITH_API_KEY = os.getenv(
+    "LANGSMITH_API_KEY"
+)
+
+LANGSMITH_ENDPOINT = os.getenv(
+    "LANGSMITH_ENDPOINT",
+    "https://api.smith.langchain.com"
+)
+
+LANGSMITH_PROJECT = os.getenv(
+    "LANGSMITH_PROJECT",
+    "IIT_Streamlit_RAG_Chatbot"
+)
+
+if LANGSMITH_TRACING.lower() == "true":
+
+    os.environ["LANGSMITH_TRACING"] = "true"
+
+    if LANGSMITH_API_KEY:
+        os.environ["LANGSMITH_API_KEY"] = LANGSMITH_API_KEY
+
+    os.environ["LANGSMITH_ENDPOINT"] = LANGSMITH_ENDPOINT
+    os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT
+
+
+# ============================================================
+# APPLICATION CONFIGURATION
+# ============================================================
+
+LLM_CONFIG = {
+
+    "default_model":
+        "llama-3.3-70b-versatile",
+
+    "temperature":
+        0,
+
+    "max_tokens":
+        1024,
+
+    "timeout":
+        None,
+
+    "max_retries":
+        2
+}
+
+
+EMBEDDING_CONFIG = {
+
+    "default_model":
+        "sentence-transformers/all-MiniLM-L6-v2",
+
+    "normalize_embeddings":
+        True,
+
+    "device":
+        "cpu",
+
+    "batch_size":
+        32,
+
+    "cache_folder":
+        "./cache/embeddings"
+}
+
+
+CHUNK_CONFIG = {
+
+    "chunk_size":
+        500,
+
+    "chunk_overlap":
+        100,
+
+    "separators": [
+        "\n\n",
+        "\n",
+        ". ",
+        "? ",
+        "! ",
+        "; ",
+        ", ",
+        " ",
+        ""
+    ]
+}
+
+
+RERANK_CONFIG = {
+
+    "default_model":
+        "cross-encoder/ms-marco-TinyBERT-L-2-v2",
+
+    "top_k":
+        5,
+
+    "batch_size":
+        16
+}
+
+
+# ============================================================
+# STREAMLIT CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="IIT RAG Chatbot",
+    page_icon=None,
+    layout="wide"
+)
+
+
+st.title("IIT Research RAG Chatbot")
+
+st.caption(
+    "Multi Query RAG + TinyBERT Reranking + Guardrails "
+    "+ Graph Generation + LangSmith"
+)
+
+
+# ============================================================
+# API KEY CHECK
+# ============================================================
+
+if not os.getenv("GROQ_API_KEY"):
+
+    st.error(
+        "GROQ_API_KEY not found in .env"
+    )
+
     st.stop()
 
-# --- Helper Functions ---
 
-@st.cache_resource
-def load_processed_documents():
-    if not os.path.exists("results/processed_documents.pkl"):
-        return None
-    with open("results/processed_documents.pkl", "rb") as f:
-        return pickle.load(f)
+# ============================================================
+# SIDEBAR
+# ============================================================
 
-@st.cache_resource
-def create_embedding_model(model_name):
-    return HuggingFaceEmbeddings(
-        model_name=model_name,
-        model_kwargs={
-            "device": EMBEDDING_CONFIG["device"]
-        },
-        encode_kwargs={
-            "normalize_embeddings": EMBEDDING_CONFIG["normalize_embeddings"],
-            "batch_size": EMBEDDING_CONFIG["batch_size"]
-        },
-        cache_folder=EMBEDDING_CONFIG["cache_folder"]
+st.sidebar.title("Settings")
+
+
+# ------------------------------------------------------------
+# LANGSMITH STATUS
+# ------------------------------------------------------------
+
+st.sidebar.subheader("LangSmith")
+
+if (
+    LANGSMITH_TRACING.lower() == "true"
+    and LANGSMITH_API_KEY
+):
+
+    st.sidebar.success(
+        "Tracing Enabled"
     )
 
-@st.cache_resource
-def create_recursive_chunker(chunk_config):
-    return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_config["chunk_size"],
-        chunk_overlap=chunk_config["chunk_overlap"],
-        separators=chunk_config["separators"],
-        keep_separator=True,
-        add_start_index=True,
-        strip_whitespace=True
+    st.sidebar.caption(
+        f"Project: {LANGSMITH_PROJECT}"
     )
 
-@st.cache_resource
-def create_reranker(model_name):
-    return CrossEncoder(model_name, max_length=512)
+else:
 
-@st.cache_resource
-def get_vectorstore(documents, _embedding_model, _chunker):
-    st.info("Creating vector store...")
-    # Chunk documents
-    chunks = _chunker.split_documents(documents)
-    
-    # Add unique IDs to chunks if not present (important for RRF)
-    for i, chunk in enumerate(chunks):
-        if 'chunk_id' not in chunk.metadata:
-            chunk.metadata['chunk_id'] = str(i) # Simple ID for demo
-
-    # Create FAISS vector store
-    vectorstore = FAISS.from_documents(chunks, _embedding_model)
-    st.success("Vector store created.")
-    return vectorstore, chunks
-
-def get_ollama_models():
-    import requests
-    try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
-        if response.status_code == 200:
-            models_data = response.json().get("models", [])
-            return [m["name"] for m in models_data]
-    except Exception:
-        pass
-    return ["llama3.2:1b", "qwen2.5-coder:7b", "gemma3:1b"]
-
-@st.cache_resource
-def create_llm(fallback_model=None):
-    primary_llm = ChatGroq(
-        model=LLM_CONFIG["default_model"],
-        temperature=LLM_CONFIG["temperature"],
-        max_tokens=LLM_CONFIG["max_tokens"],
-        timeout=LLM_CONFIG["timeout"],
-        max_retries=LLM_CONFIG["max_retries"]
+    st.sidebar.warning(
+        "Tracing Disabled"
     )
-    if fallback_model:
-        from langchain_community.llms import Ollama
-        fallback_llm = Ollama(
-            model=fallback_model,
-            temperature=LLM_CONFIG["temperature"]
-        )
-        return primary_llm.with_fallbacks([fallback_llm])
-    return primary_llm
 
-# --- Pipeline Setup ---
-
-# Sidebar LLM Settings
-st.sidebar.title("LLM Settings")
-enable_fallback = st.sidebar.checkbox("Enable Local Fallback", value=True, help="Use local Ollama model if Groq API fails")
-fallback_model = None
-if enable_fallback:
-    ollama_models = get_ollama_models()
-    default_index = 0
-    for idx, model in enumerate(ollama_models):
-        if "llama3.2:1b" in model or "gemma3:1b" in model:
-            default_index = idx
-            break
-    fallback_model = st.sidebar.selectbox("Select Fallback Model", options=ollama_models, index=default_index)
 
 st.sidebar.markdown("---")
 
-# Sidebar Document Ingestion / Status
-st.sidebar.title("Document Management")
-processed_documents = load_processed_documents()
 
-if processed_documents is not None:
-    st.sidebar.success(f"Loaded {len(processed_documents)} processed pages/documents.")
-    if st.sidebar.button("Clear Documents"):
-        if os.path.exists("results/processed_documents.pkl"):
-            os.remove("results/processed_documents.pkl")
-        st.cache_resource.clear()
-        st.rerun()
-else:
-    st.sidebar.warning("No documents loaded.")
-    uploaded_files = st.sidebar.file_uploader(
-        "Upload PDF, TXT, or MD files to build knowledge base:",
-        type=["pdf", "txt", "md"],
-        accept_multiple_files=True
+# ============================================================
+# GUARDRAIL SETTINGS
+# ============================================================
+
+st.sidebar.subheader("Guardrails")
+
+enable_guardrails = st.sidebar.checkbox(
+    "Enable Guardrails",
+    value=True
+)
+
+
+if enable_guardrails:
+
+    st.sidebar.success(
+        "Guardrails Enabled"
     )
-    if st.sidebar.button("Process & Ingest"):
-        if uploaded_files:
-            all_docs = []
-            for uploaded_file in uploaded_files:
-                filename = uploaded_file.name
-                if filename.endswith(".pdf"):
-                    import fitz
-                    file_bytes = uploaded_file.read()
-                    doc = fitz.open(stream=file_bytes, filetype="pdf")
-                    for page_idx, page in enumerate(doc):
-                        text = page.get_text("text")
-                        if text and text.strip():
-                            all_docs.append(Document(
-                                page_content=text,
-                                metadata={"filename": filename, "page_label": page_idx + 1}
-                            ))
-                else:
-                    content = uploaded_file.read().decode("utf-8", errors="ignore")
-                    all_docs.append(Document(
-                        page_content=content,
-                        metadata={"filename": filename, "page_label": 1}
-                    ))
-            if all_docs:
-                os.makedirs("results", exist_ok=True)
-                with open("results/processed_documents.pkl", "wb") as f:
-                    pickle.dump(all_docs, f)
-                st.sidebar.success(f"Ingested {len(all_docs)} pages/documents!")
-                st.cache_resource.clear()
-                st.rerun()
-            else:
-                st.sidebar.error("Could not extract text from the files.")
-        else:
-            st.sidebar.error("Please upload at least one file.")
 
-if processed_documents is None:
-    try:
-        st.info("Please upload PDF, TXT, or MD documents in the sidebar to build the knowledge base.")
-        st.stop()
-    except Exception:
-        import sys
-        sys.exit(0)
+else:
 
-# Create Embedding Model
-embedding_model = create_embedding_model(EMBEDDING_CONFIG["default_model"])
+    st.sidebar.warning(
+        "Guardrails Disabled"
+    )
 
-# Create Chunker
-recursive_chunker = create_recursive_chunker(CHUNK_CONFIG)
 
-# Create Vectorstore
-vectorstore, all_chunks = get_vectorstore(processed_documents, embedding_model, recursive_chunker)
 
-# Optimized MultiQuery Prompt template for technical/mathematical QA
-from langchain_core.prompts import PromptTemplate
+# ============================================================
+# OLLAMA MODEL DISCOVERY
+# ============================================================
 
-QUERY_PROMPT = PromptTemplate(
-    input_variables=["question"],
-    template="""You are an AI assistant task solver and expert research assistant.
-Your task is to analyze the user's input question and generate 3 different versions of the query.
-These search queries should target different perspectives, sub-questions, terminology variations, abbreviations, or physical/mathematical formulations of the original question.
-For instance:
-- If the question contains acronyms or jargon, expand them to their full terms.
-- If it involves math formulas or derivations, write the equations/formulas using standard symbols or describe them in clear text.
-- If the query is complex, break it down into simpler search terms.
-By generating multiple perspectives on the user query, your goal is to help the user retrieve the most relevant documents.
-
-Original question: {question}
-
-Provide these alternative queries separated by newlines. Do not add numbering, prefixes, introductory or concluding remarks. Just output the 3 alternative queries.
-"""
-)
-
-# Create TinyBERT Reranker
-tinybert_reranker = create_reranker(RERANK_CONFIG["default_model"])
-
-# RAG Prompt Template
-RAG_PROMPT = ChatPromptTemplate.from_template(
-    """
-    You are an expert research assistant.
-    Use ONLY the context below to answer the question.
-    If the answer is not found in the context, say you don't know.
-
-    Formatting Instructions:
-    - If your answer includes mathematical formulas, equations, symbols, or derivations, ALWAYS format them using LaTeX. Use double dollar signs `$$` for block equations (e.g. $$E = mc^2$$) and single dollar signs `$` for inline equations (e.g. $E = mc^2$).
-    - If your answer includes code, programming blocks, or scripts, ALWAYS format them using markdown code block syntax with the appropriate language identifier (e.g. ```python ... ```).
-
-    Context
-    -------
-    {context}
-
-    Conversation History
-    --------------------
-    {chat_history}
-
-    Question: {question}
-
-    Answer:
-    """
-)
-
-# --- RAG Chain Function ---
-
-def condense_question(chat_history, question, llm):
-    if not chat_history:
-        return question, False
-    
-    # Format chat history as a string
-    history_str = ""
-    for msg in chat_history[-5:]: # Keep last 5 messages for context
-        role = "User" if msg["role"] == "user" else "Assistant"
-        history_str += f"{role}: {msg['content']}\n"
-        
-    condense_prompt = f"""You are an expert conversational analyzer. Your task is to analyze the conversation history and the follow-up question, then determine if the follow-up question is contextual (meaning it depends on the context of previous messages, references past topics, or uses pronouns like "it", "they", "this", "its", "that") or if it is a standalone/independent question.
-
-Instructions:
-1. If the question is contextual, you MUST rewrite it to be a fully independent standalone question. Replace all pronouns (like "it", "its", "this", "they", "their") or vague references with the actual names, concepts, equations, or protocols mentioned in the conversation history (e.g., if the history is about "BBM92 protocol" and the question is "How secure is it?", rewrite it to "How secure is the BBM92 protocol?"). Do NOT leave any pronouns unresolved.
-2. If the question is already independent and does not refer to anything in the history, output the follow-up question exactly as-is.
-
-Your output must be in the following exact format, with no other text, markdown, or explanation:
-Is Contextual: <True/False>
-Question: <the reformulated or original question>
-
-Conversation History:
-{history_str}
-
-Follow-up Question: {question}
-"""
+def get_ollama_models():
 
     try:
-        response = llm.invoke(condense_prompt)
-        text = response.content.strip() if hasattr(response, "content") else str(response).strip()
-        is_contextual = False
-        standalone_q = question
-        
-        # Robust parsing of the output to handle varying LLM formats/markups/bullets
-        has_labels = "is contextual" in text.lower() or "question:" in text.lower()
-        if has_labels:
-            for line in text.split("\n"):
-                # Clean prefix bullet points, numbers, and common markdown syntax
-                cleaned_line = re.sub(r"^[-*\d.\s#]+", "", line).strip()
-                cleaned_line = cleaned_line.replace("*", "").replace("`", "").strip()
-                
-                if re.match(r"^Is\s+Contextual\s*:", cleaned_line, re.IGNORECASE):
-                    val = re.sub(r"^Is\s+Contextual\s*:\s*", "", cleaned_line, flags=re.IGNORECASE).strip().lower()
-                    is_contextual = "true" in val
-                elif re.match(r"^Question\s*:", cleaned_line, re.IGNORECASE):
-                    standalone_q = re.sub(r"^Question\s*:\s*", "", cleaned_line, flags=re.IGNORECASE).strip()
-        else:
-            # Fallback if the LLM output doesn't use the format labels at all
-            standalone_q = text.replace("*", "").replace("`", "").strip()
-            is_contextual = standalone_q.lower() != question.lower()
-            
-        return standalone_q, is_contextual
+
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=2
+        )
+
+        if response.status_code == 200:
+
+            models_data = response.json().get(
+                "models",
+                []
+            )
+
+            models = [
+                model["name"]
+                for model in models_data
+            ]
+
+            if models:
+                return models
+
     except Exception:
         pass
-    return question, False
 
-def get_rag_response(question, chat_history, llm, vectorstore, reranker):
-    # 1. Condense the question using chat history
-    standalone_question, is_contextual = condense_question(chat_history, question, llm)
-    
-    # 2. Retrieve documents using MultiQuery with standalone question (created dynamically with current llm)
-    retriever = MultiQueryRetriever.from_llm(
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),
-        llm=llm,
-        prompt=QUERY_PROMPT
-    )
-    retrieved_docs_multiquery = retriever.invoke(standalone_question)
-    
-    # 3. Rerank retrieved documents using TinyBERT
-    pairs = [
-        (standalone_question, doc.page_content)
-        for doc in retrieved_docs_multiquery
+
+    return [
+        "llama3.2:1b",
+        "qwen2.5-coder:7b",
+        "gemma3:1b"
     ]
-    scores = reranker.predict(
-        pairs,
-        batch_size=RERANK_CONFIG["batch_size"],
-        show_progress_bar=False
-    )
-    ranked_docs = sorted(
-        zip(scores, retrieved_docs_multiquery),
-        key=lambda x: x[0],
-        reverse=True
-    )
-    
-    # Take top K reranked documents for context
-    top_k_reranked_docs = [doc for score, doc in ranked_docs[:RERANK_CONFIG["top_k"]]]
 
-    context = "\n\n".join(
-        [
-            doc.page_content
-            for doc in top_k_reranked_docs
+
+# ============================================================
+# LLM SETTINGS
+# ============================================================
+
+st.sidebar.subheader("LLM Settings")
+
+
+enable_fallback = st.sidebar.checkbox(
+    "Enable Ollama Local Fallback",
+    value=True
+)
+
+
+fallback_model = None
+
+
+if enable_fallback:
+
+    ollama_models = get_ollama_models()
+
+    default_index = 0
+
+    for index, model in enumerate(
+        ollama_models
+    ):
+
+        if (
+            "llama3.2:1b" in model
+            or
+            "gemma3:1b" in model
+        ):
+
+            default_index = index
+            break
+
+
+    fallback_model = st.sidebar.selectbox(
+        "Fallback Model",
+        options=ollama_models,
+        index=default_index
+    )
+
+
+# ============================================================
+# LOAD PROCESSED DOCUMENTS
+# ============================================================
+
+@st.cache_resource
+def load_processed_documents():
+
+    path = (
+        "results/"
+        "processed_documents.pkl"
+    )
+
+    if not os.path.exists(path):
+
+        return None
+
+
+    with open(
+        path,
+        "rb"
+    ) as file:
+
+        return pickle.load(file)
+
+
+# ============================================================
+# EMBEDDING MODEL
+# ============================================================
+
+@st.cache_resource
+def create_embedding_model(
+    model_name
+):
+
+    return HuggingFaceEmbeddings(
+
+        model_name=model_name,
+
+        model_kwargs={
+            "device":
+                EMBEDDING_CONFIG["device"]
+        },
+
+        encode_kwargs={
+
+            "normalize_embeddings":
+                EMBEDDING_CONFIG[
+                    "normalize_embeddings"
+                ],
+
+            "batch_size":
+                EMBEDDING_CONFIG[
+                    "batch_size"
+                ]
+        },
+
+        cache_folder=
+            EMBEDDING_CONFIG[
+                "cache_folder"
+            ]
+    )
+
+
+# ============================================================
+# CHUNKER
+# ============================================================
+
+@st.cache_resource
+def create_recursive_chunker(
+    chunk_config
+):
+
+    return RecursiveCharacterTextSplitter(
+
+        chunk_size=
+            chunk_config["chunk_size"],
+
+        chunk_overlap=
+            chunk_config["chunk_overlap"],
+
+        separators=
+            chunk_config["separators"],
+
+        keep_separator=True,
+
+        add_start_index=True,
+
+        strip_whitespace=True
+    )
+
+
+# ============================================================
+# RERANKER
+# ============================================================
+
+@st.cache_resource
+def create_reranker(
+    model_name
+):
+
+    return CrossEncoder(
+        model_name,
+        max_length=512
+    )
+
+
+# ============================================================
+# VECTOR STORE
+# ============================================================
+
+@st.cache_resource
+def get_vectorstore(
+    documents,
+    _embedding_model,
+    _chunker
+):
+
+    chunks = _chunker.split_documents(
+        documents
+    )
+
+
+    for index, chunk in enumerate(
+        chunks
+    ):
+
+        if "chunk_id" not in chunk.metadata:
+
+            chunk.metadata[
+                "chunk_id"
+            ] = str(index)
+
+
+    vectorstore = FAISS.from_documents(
+        chunks,
+        _embedding_model
+    )
+
+
+    return vectorstore, chunks
+
+
+# ============================================================
+# CREATE LLM
+# ============================================================
+
+@st.cache_resource
+def create_llm(
+    fallback_model=None
+):
+
+    primary_llm = ChatGroq(
+
+        model=
+            LLM_CONFIG[
+                "default_model"
+            ],
+
+        temperature=
+            LLM_CONFIG[
+                "temperature"
+            ],
+
+        max_tokens=
+            LLM_CONFIG[
+                "max_tokens"
+            ],
+
+        timeout=
+            LLM_CONFIG[
+                "timeout"
+            ],
+
+        max_retries=
+            LLM_CONFIG[
+                "max_retries"
+            ]
+    )
+
+
+    if fallback_model:
+
+        try:
+
+            fallback_llm = OllamaLLM(
+
+                model=fallback_model,
+
+                temperature=
+                    LLM_CONFIG[
+                        "temperature"
+                    ]
+            )
+
+
+            return primary_llm.with_fallbacks(
+                [fallback_llm]
+            )
+
+
+        except Exception as e:
+
+            st.warning(
+                f"Ollama fallback unavailable: {e}"
+            )
+
+
+    return primary_llm
+
+
+# ============================================================
+# DOCUMENT INGESTION
+# ============================================================
+
+processed_documents = (
+    load_processed_documents()
+)
+
+
+if processed_documents is not None:
+
+    st.sidebar.success(
+        f"Loaded "
+        f"{len(processed_documents)} "
+        f"pages/documents"
+    )
+
+
+    if st.sidebar.button(
+        "Clear Documents"
+    ):
+
+        path = (
+            "results/"
+            "processed_documents.pkl"
+        )
+
+
+        if os.path.exists(path):
+
+            os.remove(path)
+
+
+        st.cache_resource.clear()
+
+        st.rerun()
+
+
+else:
+
+    st.sidebar.warning(
+        "No documents loaded"
+    )
+
+
+    uploaded_files = (
+        st.sidebar.file_uploader(
+            "Upload PDF, TXT or MD",
+            type=[
+                "pdf",
+                "txt",
+                "md"
+            ],
+            accept_multiple_files=True
+        )
+    )
+
+
+    if st.sidebar.button(
+        "Process & Ingest"
+    ):
+
+        if not uploaded_files:
+
+            st.sidebar.error(
+                "Upload at least one file."
+            )
+
+        else:
+
+            all_docs = []
+
+
+            for uploaded_file in (
+                uploaded_files
+            ):
+
+                filename = (
+                    uploaded_file.name
+                )
+
+
+                # ------------------------------------------------
+                # PDF
+                # ------------------------------------------------
+
+                if filename.lower().endswith(
+                    ".pdf"
+                ):
+
+                    import fitz
+
+
+                    file_bytes = (
+                        uploaded_file.read()
+                    )
+
+
+                    pdf = fitz.open(
+                        stream=file_bytes,
+                        filetype="pdf"
+                    )
+
+
+                    for page_index, page in enumerate(
+                        pdf
+                    ):
+
+                        text = page.get_text(
+                            "text"
+                        )
+
+
+                        if (
+                            text
+                            and
+                            text.strip()
+                        ):
+
+                            all_docs.append(
+
+                                Document(
+
+                                    page_content=text,
+
+                                    metadata={
+
+                                        "filename":
+                                            filename,
+
+                                        "page_label":
+                                            page_index + 1
+                                    }
+                                )
+                            )
+
+
+                # ------------------------------------------------
+                # TXT / MD
+                # ------------------------------------------------
+
+                else:
+
+                    content = (
+                        uploaded_file
+                        .read()
+                        .decode(
+                            "utf-8",
+                            errors="ignore"
+                        )
+                    )
+
+
+                    if content.strip():
+
+                        all_docs.append(
+
+                            Document(
+
+                                page_content=content,
+
+                                metadata={
+
+                                    "filename":
+                                        filename,
+
+                                    "page_label":
+                                        1
+                                }
+                            )
+                        )
+
+
+            if all_docs:
+
+                os.makedirs(
+                    "results",
+                    exist_ok=True
+                )
+
+
+                with open(
+                    "results/"
+                    "processed_documents.pkl",
+                    "wb"
+                ) as file:
+
+                    pickle.dump(
+                        all_docs,
+                        file
+                    )
+
+
+                st.sidebar.success(
+                    f"Ingested "
+                    f"{len(all_docs)} "
+                    f"pages/documents"
+                )
+
+
+                st.cache_resource.clear()
+
+                st.rerun()
+
+
+            else:
+
+                st.sidebar.error(
+                    "Could not extract text."
+                )
+
+
+if processed_documents is None:
+
+    st.info(
+        "Upload a PDF, TXT or MD document "
+        "from the sidebar."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# CREATE RAG COMPONENTS
+# ============================================================
+
+embedding_model = (
+    create_embedding_model(
+        EMBEDDING_CONFIG[
+            "default_model"
         ]
     )
+)
 
-    # Format history for prompt ONLY if it is contextual
+
+recursive_chunker = (
+    create_recursive_chunker(
+        CHUNK_CONFIG
+    )
+)
+
+
+vectorstore, all_chunks = (
+    get_vectorstore(
+        processed_documents,
+        embedding_model,
+        recursive_chunker
+    )
+)
+
+
+tinybert_reranker = (
+    create_reranker(
+        RERANK_CONFIG[
+            "default_model"
+        ]
+    )
+)
+
+
+# ============================================================
+# MULTI QUERY PROMPT
+# ============================================================
+
+QUERY_PROMPT = PromptTemplate(
+
+    input_variables=[
+        "question"
+    ],
+
+    template="""
+You are an expert research assistant.
+
+Generate exactly 3 alternative search queries
+for the user's question.
+
+The queries should explore:
+
+1. Different terminology
+2. Technical or mathematical formulation
+3. A decomposed version of the question
+
+Expand abbreviations when useful.
+
+If the question contains equations,
+include mathematical terminology.
+
+Return ONLY the 3 queries.
+One query per line.
+
+Original question:
+
+{question}
+"""
+)
+
+
+# ============================================================
+# RAG PROMPT
+# ============================================================
+
+RAG_PROMPT = ChatPromptTemplate.from_template(
+"""
+You are an expert research assistant.
+
+Answer the user's question using ONLY
+the supplied document context.
+
+Rules:
+
+1. Do not invent facts.
+2. Do not invent numerical values.
+3. If the answer cannot be found in the
+   context, say:
+
+   "I don't know based on the provided documents."
+
+4. Mathematical equations must use LaTeX.
+
+5. Code must use markdown code blocks.
+
+6. Clearly distinguish information from
+   the documents from reasoning.
+
+Context
+-------
+{context}
+
+Conversation History
+--------------------
+{chat_history}
+
+Question
+--------
+{question}
+
+Answer:
+"""
+)
+
+
+# ============================================================
+# GUARDRAIL
+# ============================================================
+
+def run_guardrail(
+    question,
+    llm
+):
+
+    guardrail_prompt = ChatPromptTemplate.from_template(
+"""
+You are a security and relevance guardrail
+for a research document chatbot.
+
+Classify the user's request.
+
+Allowed requests:
+
+- Questions about uploaded documents
+- Summaries
+- Explanations
+- Mathematical analysis
+- Technical questions
+- Comparisons based on documents
+- Data analysis
+- Graph generation based on document data
+
+Potentially unsafe or inappropriate requests
+should be rejected.
+
+Return ONLY:
+
+ALLOWED
+
+or
+
+BLOCKED
+
+User request:
+
+{question}
+"""
+    )
+
+
+    try:
+
+        chain = (
+            guardrail_prompt
+            | llm
+            | StrOutputParser()
+        )
+
+
+        result = chain.invoke({
+
+            "question":
+                question
+        })
+
+
+        result = result.strip().upper()
+
+
+        if "BLOCKED" in result:
+
+            return False
+
+
+        return True
+
+
+    except Exception:
+
+        # Fail open for normal research use
+        return True
+
+
+# ============================================================
+# QUESTION CONDENSATION
+# ============================================================
+
+def condense_question(
+    chat_history,
+    question,
+    llm
+):
+
+    if not chat_history:
+
+        return question, False
+
+
     history_str = ""
+
+
+    for message in chat_history[-5:]:
+
+        role = (
+            "User"
+            if message["role"] == "user"
+            else "Assistant"
+        )
+
+
+        history_str += (
+            f"{role}: "
+            f"{message['content']}\n"
+        )
+
+
+    prompt = f"""
+You are a conversational question analyzer.
+
+Determine whether the new question depends
+on the previous conversation.
+
+If contextual, rewrite it as a fully
+standalone question.
+
+Resolve pronouns such as:
+
+it
+this
+that
+they
+their
+its
+
+Return EXACTLY:
+
+Is Contextual: True/False
+Question: standalone question
+
+Conversation:
+
+{history_str}
+
+New question:
+
+{question}
+"""
+
+
+    try:
+
+        response = llm.invoke(
+            prompt
+        )
+
+
+        text = (
+            response.content
+            if hasattr(
+                response,
+                "content"
+            )
+            else str(response)
+        )
+
+
+        text = text.strip()
+
+
+        is_contextual = False
+
+        standalone_question = question
+
+
+        for line in text.splitlines():
+
+            cleaned = (
+                line
+                .replace(
+                    "`",
+                    ""
+                )
+                .strip()
+            )
+
+
+            if re.match(
+                r"^Is\s+Contextual\s*:",
+                cleaned,
+                re.I
+            ):
+
+                value = re.sub(
+                    r"^Is\s+Contextual\s*:\s*",
+                    "",
+                    cleaned,
+                    flags=re.I
+                )
+
+
+                is_contextual = (
+                    value.strip().lower()
+                    == "true"
+                )
+
+
+            elif re.match(
+                r"^Question\s*:",
+                cleaned,
+                re.I
+            ):
+
+                standalone_question = re.sub(
+                    r"^Question\s*:\s*",
+                    "",
+                    cleaned,
+                    flags=re.I
+                ).strip()
+
+
+        return (
+            standalone_question,
+            is_contextual
+        )
+
+
+    except Exception:
+
+        return (
+            question,
+            False
+        )
+
+
+# ============================================================
+# GRAPH REQUEST DETECTION
+# ============================================================
+
+def is_graph_request(
+    question
+):
+
+    patterns = [
+
+        r"\bgenerate\s+(a\s+)?graph\b",
+
+        r"\bcreate\s+(a\s+)?graph\b",
+
+        r"\bmake\s+(a\s+)?graph\b",
+
+        r"\bplot\b",
+
+        r"\bgraph\b",
+
+        r"\bchart\b",
+
+        r"\bvisualize\b",
+
+        r"\bvisualise\b",
+
+        r"\bline\s+chart\b",
+
+        r"\bbar\s+chart\b",
+
+        r"\bscatter\s+plot\b",
+
+        r"\bhistogram\b",
+
+        r"\bpie\s+chart\b"
+    ]
+
+
+    question = question.lower()
+
+
+    return any(
+        re.search(
+            pattern,
+            question
+        )
+        for pattern in patterns
+    )
+
+
+# ============================================================
+# GRAPH EXTRACTION PROMPT
+# ============================================================
+
+GRAPH_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages(
+[
+    (
+        "system",
+        """
+You are a numerical data extraction assistant.
+
+The user wants to create a graph from
+numerical information contained in documents.
+
+IMPORTANT RULES:
+
+1. ONLY use numerical data that appears
+   in the provided context.
+
+2. NEVER invent numerical values.
+
+3. Do not estimate missing values.
+
+4. Do not use outside knowledge.
+
+5. Extract values exactly as they appear.
+
+6. Return ONLY valid JSON.
+
+Allowed graph types:
+
+line
+bar
+scatter
+
+Required JSON structure:
+
+{{
+    "title": "Graph title",
+    "x_label": "X axis",
+    "y_label": "Y axis",
+    "graph_type": "line",
+    "data": [
+        {{
+            "x": 1,
+            "y": 10
+        }}
+    ]
+}}
+
+If numerical data cannot be found,
+return:
+
+{{
+    "error": "No numerical data found"
+}}
+
+DOCUMENT CONTEXT:
+
+{context}
+
+USER REQUEST:
+
+{question}
+"""
+    )
+]
+)
+
+
+# ============================================================
+# EXTRACT GRAPH DATA
+# ============================================================
+
+def extract_graph_data(
+    question,
+    context,
+    llm
+):
+
+    try:
+
+        prompt_value = (
+            GRAPH_EXTRACTION_PROMPT.invoke(
+                {
+                    "context":
+                        context,
+
+                    "question":
+                        question
+                }
+            )
+        )
+
+
+        response = llm.invoke(
+            prompt_value
+        )
+
+
+        text = (
+
+            response.content
+
+            if hasattr(
+                response,
+                "content"
+            )
+
+            else str(response)
+        )
+
+
+        text = text.strip()
+
+
+        # Remove markdown fences
+
+        text = re.sub(
+            r"^```json\s*",
+            "",
+            text,
+            flags=re.I
+        )
+
+
+        text = re.sub(
+            r"^```\s*",
+            "",
+            text
+        )
+
+
+        text = re.sub(
+            r"\s*```$",
+            "",
+            text
+        )
+
+
+        text = text.strip()
+
+
+        # First attempt (direct load)
+
+        try:
+
+            return json.loads(
+                text
+            )
+
+
+        except json.JSONDecodeError:
+
+            pass
+
+
+        # Brace balancing attempt to extract the first complete JSON object
+
+        start_idx = text.find("{")
+
+        if start_idx != -1:
+
+            balance = 0
+
+            for i in range(start_idx, len(text)):
+
+                if text[i] == "{":
+
+                    balance += 1
+
+                elif text[i] == "}":
+
+                    balance -= 1
+
+                    if balance == 0:
+
+                        candidate = text[
+                            start_idx : i + 1
+                        ]
+
+
+                        try:
+
+                            return json.loads(
+                                candidate
+                            )
+
+                        except json.JSONDecodeError:
+
+                            pass
+
+                        break
+
+
+        return {
+
+            "error":
+                "LLM returned invalid JSON."
+        }
+
+
+    except Exception as e:
+
+        return {
+
+            "error":
+                f"Graph extraction failed: {str(e)}"
+        }
+
+
+# ============================================================
+# VALIDATE GRAPH DATA
+# ============================================================
+
+def validate_graph_data(
+    graph_data
+):
+
+    if not isinstance(
+        graph_data,
+        dict
+    ):
+
+        return False, None, (
+            "Invalid graph data."
+        )
+
+
+    if "error" in graph_data:
+
+        return False, None, (
+            graph_data["error"]
+        )
+
+
+    data = graph_data.get(
+        "data",
+        []
+    )
+
+
+    if not data:
+
+        return False, None, (
+            "No numerical data found."
+        )
+
+
+    try:
+
+        df = pd.DataFrame(
+            data
+        )
+
+
+    except Exception as e:
+
+        return False, None, (
+            f"Could not create dataframe: {e}"
+        )
+
+
+    if "x" not in df.columns:
+
+        return False, None, (
+            "X-axis data is missing."
+        )
+
+
+    if "y" not in df.columns:
+
+        return False, None, (
+            "Y-axis data is missing."
+        )
+
+
+    try:
+
+        df["x"] = pd.to_numeric(
+            df["x"],
+            errors="raise"
+        )
+
+        df["y"] = pd.to_numeric(
+            df["y"],
+            errors="raise"
+        )
+
+
+    except Exception:
+
+        return False, None, (
+            "X and Y values must be numerical."
+        )
+
+
+    if len(df) == 0:
+
+        return False, None, (
+            "No valid numerical rows."
+        )
+
+
+    return True, df, None
+
+
+# ============================================================
+# GENERATE GRAPH
+# ============================================================
+
+def generate_graph(
+    graph_data
+):
+
+    valid, df, error = (
+        validate_graph_data(
+            graph_data
+        )
+    )
+
+
+    if not valid:
+
+        return None, error
+
+
+    graph_type = graph_data.get(
+        "graph_type",
+        "line"
+    )
+
+
+    title = graph_data.get(
+        "title",
+        "Document Data"
+    )
+
+
+    x_label = graph_data.get(
+        "x_label",
+        "X"
+    )
+
+
+    y_label = graph_data.get(
+        "y_label",
+        "Y"
+    )
+
+
+    fig, ax = plt.subplots(
+        figsize=(10, 6)
+    )
+
+
+    if graph_type == "bar":
+
+        ax.bar(
+            df["x"].astype(str),
+            df["y"]
+        )
+
+
+    elif graph_type == "scatter":
+
+        ax.scatter(
+            df["x"],
+            df["y"]
+        )
+
+
+    else:
+
+        df = df.sort_values(
+            "x"
+        )
+
+
+        ax.plot(
+            df["x"],
+            df["y"],
+            marker="o"
+        )
+
+
+    ax.set_title(
+        title
+    )
+
+
+    ax.set_xlabel(
+        x_label
+    )
+
+
+    ax.set_ylabel(
+        y_label
+    )
+
+
+    ax.grid(
+        True,
+        alpha=0.3
+    )
+
+
+    fig.tight_layout()
+
+
+    return fig, None
+
+
+# ============================================================
+# RAG PIPELINE
+# ============================================================
+
+def get_rag_response(
+    question,
+    chat_history,
+    llm,
+    vectorstore,
+    reranker
+):
+
+    # --------------------------------------------------------
+    # 1. QUESTION CONDENSATION
+    # --------------------------------------------------------
+
+    standalone_question, is_contextual = (
+        condense_question(
+            chat_history,
+            question,
+            llm
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # 2. MULTI QUERY RETRIEVAL
+    # --------------------------------------------------------
+
+    retriever = (
+        MultiQueryRetriever.from_llm(
+
+            retriever=
+                vectorstore.as_retriever(
+                    search_kwargs={
+                        "k": 5
+                    }
+                ),
+
+            llm=llm,
+
+            prompt=QUERY_PROMPT
+        )
+    )
+
+
+    retrieved_docs = (
+        retriever.invoke(
+            standalone_question
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # 3. RERANK
+    # --------------------------------------------------------
+
+    if not retrieved_docs:
+
+        return (
+            "I don't know based on the "
+            "provided documents.",
+            [],
+            standalone_question,
+            is_contextual
+        )
+
+
+    pairs = [
+
+        (
+            standalone_question,
+            doc.page_content
+        )
+
+        for doc in retrieved_docs
+    ]
+
+
+    scores = reranker.predict(
+        pairs,
+
+        batch_size=
+            RERANK_CONFIG[
+                "batch_size"
+            ],
+
+        show_progress_bar=False
+    )
+
+
+    ranked_docs = sorted(
+
+        zip(
+            scores,
+            retrieved_docs
+        ),
+
+        key=lambda x: x[0],
+
+        reverse=True
+    )
+
+
+    top_docs = [
+
+        doc
+
+        for score, doc
+        in ranked_docs[
+            :RERANK_CONFIG[
+                "top_k"
+            ]
+        ]
+    ]
+
+
+    # --------------------------------------------------------
+    # 4. CONTEXT
+    # --------------------------------------------------------
+
+    context = "\n\n".join(
+
+        doc.page_content
+
+        for doc in top_docs
+    )
+
+
+    # --------------------------------------------------------
+    # 5. CONVERSATION HISTORY
+    # --------------------------------------------------------
+
+    history_str = ""
+
+
     if is_contextual:
-        for msg in chat_history[-5:]:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            history_str += f"{role}: {msg['content']}\n"
 
-    # 4. Generate answer using LLM
-    rag_chain = RAG_PROMPT | llm | StrOutputParser()
+        for message in chat_history[-5:]:
+
+            role = (
+
+                "User"
+
+                if message["role"] == "user"
+
+                else "Assistant"
+            )
+
+
+            history_str += (
+                f"{role}: "
+                f"{message['content']}\n"
+            )
+
+
+    # --------------------------------------------------------
+    # 6. GENERATE ANSWER
+    # --------------------------------------------------------
+
+    rag_chain = (
+        RAG_PROMPT
+        | llm
+        | StrOutputParser()
+    )
+
+
     answer = rag_chain.invoke({
-        "context": context,
-        "chat_history": history_str,
-        "question": standalone_question
-    })
-    return answer, top_k_reranked_docs
 
-# --- Streamlit Chat Interface ---
+        "context":
+            context,
+
+        "chat_history":
+            history_str,
+
+        "question":
+            standalone_question
+    })
+
+
+    return (
+        answer,
+        top_docs,
+        standalone_question,
+        is_contextual
+    )
+
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
 
 if "messages" not in st.session_state:
+
     st.session_state.messages = []
 
+
+# ============================================================
+# DISPLAY CHAT HISTORY
+# ============================================================
+
 for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask a question about the documents..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    with st.chat_message(
+        message["role"]
+    ):
 
-    with st.chat_message("assistant"):
-        with st.spinner("Generating response..."):
-            llm_instance = create_llm(fallback_model) # Create LLM instance for each request to avoid caching issues
-            response, retrieved_reranked_docs = get_rag_response(prompt, st.session_state.messages[:-1], llm_instance, vectorstore, tinybert_reranker)
-            st.markdown(response)
-            
-            with st.expander("Retrieved Documents (Reranked Top 5)"):
-                for i, doc in enumerate(retrieved_reranked_docs):
-                    st.write(f"**Document {i+1} (Source: {doc.metadata.get('filename', 'N/A')}, Page: {doc.metadata.get('page_label', 'N/A')})**")
-                    st.text(doc.page_content[:500] + "...") # Display first 500 chars
-                    st.markdown("---")
+        st.markdown(
+            message["content"]
+        )
 
-    st.session_state.messages.append({"role": "assistant", "content": response})
+
+# ============================================================
+# CHAT INPUT
+# ============================================================
+
+prompt = st.chat_input(
+    "Ask a question about the documents..."
+)
+
+
+if prompt:
+
+    # --------------------------------------------------------
+    # USER MESSAGE
+    # --------------------------------------------------------
+
+    st.session_state.messages.append({
+
+        "role":
+            "user",
+
+        "content":
+            prompt
+    })
+
+
+    with st.chat_message(
+        "user"
+    ):
+
+        st.markdown(
+            prompt
+        )
+
+
+    # --------------------------------------------------------
+    # ASSISTANT
+    # --------------------------------------------------------
+
+    with st.chat_message(
+        "assistant"
+    ):
+
+        with st.spinner(
+            "Processing..."
+        ):
+
+            start_time = time.time()
+
+
+            # ------------------------------------------------
+            # CREATE LLM
+            # ------------------------------------------------
+
+            llm_instance = (
+                create_llm(
+                    fallback_model
+                )
+            )
+
+
+            # ------------------------------------------------
+            # GUARDRAIL
+            # ------------------------------------------------
+
+            if enable_guardrails:
+
+                allowed = (
+                    run_guardrail(
+                        prompt,
+                        llm_instance
+                    )
+                )
+
+
+                if not allowed:
+
+                    response = (
+                        "I can't help with that "
+                        "request. Please ask a question "
+                        "related to the uploaded research "
+                        "documents."
+                    )
+
+
+                    st.warning(
+                        response
+                    )
+
+
+                    st.session_state.messages.append({
+
+                        "role":
+                            "assistant",
+
+                        "content":
+                            response
+                    })
+
+
+                    st.stop()
+
+
+            # ------------------------------------------------
+            # RAG
+            # ------------------------------------------------
+
+            (
+                response,
+                retrieved_docs,
+                standalone_question,
+                is_contextual
+            ) = get_rag_response(
+
+                prompt,
+
+                st.session_state.messages[
+                    :-1
+                ],
+
+                llm_instance,
+
+                vectorstore,
+
+                tinybert_reranker
+            )
+
+
+            elapsed_time = (
+                time.time()
+                - start_time
+            )
+
+
+            # ------------------------------------------------
+            # DISPLAY ANSWER
+            # ------------------------------------------------
+
+            st.markdown(
+                response
+            )
+
+
+            st.caption(
+                f"Response time: "
+                f"{elapsed_time:.2f} seconds"
+            )
+
+
+            # =================================================
+            # GRAPH GENERATION
+            # =================================================
+
+            if is_graph_request(
+                prompt
+            ):
+
+                st.markdown(
+                    "### Graph Generation"
+                )
+
+
+                graph_context = "\n\n".join(
+
+                    doc.page_content
+
+                    for doc
+                    in retrieved_docs
+                )
+
+
+                with st.spinner(
+                    "Extracting numerical data..."
+                ):
+
+                    graph_data = (
+                        extract_graph_data(
+
+                            question=
+                                standalone_question,
+
+                            context=
+                                graph_context,
+
+                            llm=
+                                llm_instance
+                        )
+                    )
+
+
+                if "error" in graph_data:
+
+                    st.error(
+                        graph_data["error"]
+                    )
+
+
+                else:
+
+                    valid, df, error = (
+                        validate_graph_data(
+                            graph_data
+                        )
+                    )
+
+
+                    if not valid:
+
+                        st.error(
+                            error
+                        )
+
+                    else:
+
+                        st.write(
+                            "**Extracted Data**"
+                        )
+
+
+                        st.dataframe(
+                            df,
+                            width="stretch"
+                        )
+
+
+                        fig, graph_error = (
+                            generate_graph(
+                                graph_data
+                            )
+                        )
+
+
+                        if graph_error:
+
+                            st.error(
+                                graph_error
+                            )
+
+                        else:
+
+                            st.pyplot(
+                                fig,
+                                width="stretch"
+                            )
+
+
+                            st.download_button(
+
+                                "Download Graph Data CSV",
+
+                                data=df.to_csv(
+                                    index=False
+                                ),
+
+                                file_name=
+                                    "graph_data.csv",
+
+                                mime=
+                                    "text/csv"
+                            )
+
+
+            # =================================================
+            # RETRIEVED DOCUMENTS
+            # =================================================
+
+            with st.expander(
+                "Retrieved Documents"
+            ):
+
+                if not retrieved_docs:
+
+                    st.write(
+                        "No documents retrieved."
+                    )
+
+                else:
+
+                    for index, doc in enumerate(
+                        retrieved_docs
+                    ):
+
+                        st.markdown(
+                            f"### Document {index + 1}"
+                        )
+
+
+                        st.write(
+                            "**Source:** "
+                            f"{doc.metadata.get('filename', 'N/A')}"
+                        )
+
+
+                        st.write(
+                            "**Page:** "
+                            f"{doc.metadata.get('page_label', 'N/A')}"
+                        )
+
+
+                        st.text(
+                            doc.page_content[
+                                :1000
+                            ]
+                        )
+
+
+                        st.markdown(
+                            "---"
+                        )
+
+
+            # =================================================
+            # QUESTION INFORMATION
+            # =================================================
+
+            with st.expander(
+                "RAG Execution Details"
+            ):
+
+                st.write(
+                    "**Original Question:**"
+                )
+
+                st.write(
+                    prompt
+                )
+
+
+                st.write(
+                    "**Standalone Question:**"
+                )
+
+                st.write(
+                    standalone_question
+                )
+
+
+                st.write(
+                    "**Contextual Question:**"
+                )
+
+                st.write(
+                    is_contextual
+                )
+
+
+                st.write(
+                    "**Retrieved Chunks:**"
+                )
+
+                st.write(
+                    len(retrieved_docs)
+                )
+
+
+
+    # --------------------------------------------------------
+    # SAVE ASSISTANT MESSAGE
+    # --------------------------------------------------------
+
+    st.session_state.messages.append({
+
+        "role":
+            "assistant",
+
+        "content":
+            response
+    })
