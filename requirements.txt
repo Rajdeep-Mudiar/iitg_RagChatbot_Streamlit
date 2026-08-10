@@ -16,3 +16,4 @@ pypdf
 pymupdf
 matplotlib
 pdfplumber
+langchain-ollama
