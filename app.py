@@ -1035,11 +1035,8 @@ Rules:
    "I don't know based on the provided documents."
 
 4. Mathematical and formula formatting rules:
-   - For standalone/block equations, format in LaTeX wrapped in double dollar signs on their own lines:
-     $$
-     \text{equation}
-     $$
-   - For inline variables, terms, and expressions, format in LaTeX wrapped in single dollar signs: $x$, $e_{\text{total}}$, $G_{\text{total}}$.
+   - For standalone/block equations, format in LaTeX wrapped in double dollar signs on their own lines ($$ equation $$).
+   - For inline variables, terms, and expressions, format in LaTeX wrapped in single dollar signs ($x$, $y$, etc.).
    - Do NOT use square brackets [ ... ] or parentheses ( ... ) for mathematical formulas.
 
 5. Code must use markdown code blocks.
