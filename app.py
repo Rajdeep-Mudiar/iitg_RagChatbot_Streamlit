@@ -31,37 +31,51 @@ from langchain_classic.retrievers.multi_query import MultiQueryRetriever
 from sentence_transformers import CrossEncoder
 
 
-# ============================================================
-# LOAD ENVIRONMENT
-# ============================================================
+# LOAD ENVIRONMENT & SECRETS
 
 load_dotenv()
 
 
-# ============================================================
-# LANGSMITH CONFIGURATION
-# ============================================================
+def get_config_value(key: str, default: str = None) -> str:
+    """Safely get config from os.environ or st.secrets."""
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return default
 
-LANGSMITH_TRACING = os.getenv(
+
+GROQ_API_KEY = get_config_value("GROQ_API_KEY")
+if GROQ_API_KEY:
+    os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+
+
+# LANGSMITH CONFIGURATION
+
+LANGSMITH_TRACING = get_config_value(
     "LANGSMITH_TRACING",
     "false"
 )
 
-LANGSMITH_API_KEY = os.getenv(
+LANGSMITH_API_KEY = get_config_value(
     "LANGSMITH_API_KEY"
 )
 
-LANGSMITH_ENDPOINT = os.getenv(
+LANGSMITH_ENDPOINT = get_config_value(
     "LANGSMITH_ENDPOINT",
     "https://api.smith.langchain.com"
 )
 
-LANGSMITH_PROJECT = os.getenv(
+LANGSMITH_PROJECT = get_config_value(
     "LANGSMITH_PROJECT",
     "IIT_Streamlit_RAG_Chatbot"
 )
 
-if LANGSMITH_TRACING.lower() == "true":
+if LANGSMITH_TRACING and LANGSMITH_TRACING.lower() == "true":
 
     os.environ["LANGSMITH_TRACING"] = "true"
 
@@ -72,14 +86,13 @@ if LANGSMITH_TRACING.lower() == "true":
     os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT
 
 
-# ============================================================
+
 # APPLICATION CONFIGURATION
-# ============================================================
 
 LLM_CONFIG = {
 
     "default_model":
-        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
 
     "temperature":
         0,
@@ -149,9 +162,8 @@ RERANK_CONFIG = {
 }
 
 
-# ============================================================
+
 # STREAMLIT CONFIG
-# ============================================================
 
 st.set_page_config(
     page_title="IIT RAG Chatbot",
@@ -168,22 +180,20 @@ st.caption(
 )
 
 
-# ============================================================
-# API KEY CHECK
-# ============================================================
 
-if not os.getenv("GROQ_API_KEY"):
+# API KEY CHECK
+
+if not GROQ_API_KEY:
 
     st.error(
-        "GROQ_API_KEY not found in .env"
+        "GROQ_API_KEY not found. Please provide it in your .env file or Streamlit Secrets."
     )
 
     st.stop()
 
 
-# ============================================================
+
 # SIDEBAR
-# ============================================================
 
 st.sidebar.title("Settings")
 
@@ -195,7 +205,8 @@ st.sidebar.title("Settings")
 st.sidebar.subheader("LangSmith")
 
 if (
-    LANGSMITH_TRACING.lower() == "true"
+    LANGSMITH_TRACING
+    and LANGSMITH_TRACING.lower() == "true"
     and LANGSMITH_API_KEY
 ):
 
@@ -244,8 +255,72 @@ else:
 
 
 # ============================================================
-# OLLAMA MODEL DISCOVERY
+# GROQ & OLLAMA MODEL DISCOVERY
 # ============================================================
+
+def get_groq_models(api_key=None):
+
+    fallback_models = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b",
+        "qwen/qwen3.8-27b"
+    ]
+
+    key = api_key or os.getenv("GROQ_API_KEY")
+
+    if not key:
+        return fallback_models
+
+    try:
+        response = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=3
+        )
+
+        if response.status_code == 200:
+            data = response.json().get("data", [])
+            excluded = [
+                "whisper",
+                "guard",
+                "audio",
+                "orpheus",
+                "vision",
+                "embed"
+            ]
+
+            valid_models = []
+            for item in data:
+                if item.get("active", True):
+                    model_id = item.get("id", "")
+                    if not any(ex in model_id.lower() for ex in excluded):
+                        valid_models.append(model_id)
+
+            if valid_models:
+                preferred = "openai/gpt-oss-120b"
+                if preferred in valid_models:
+                    valid_models.remove(preferred)
+                    valid_models.insert(0, preferred)
+                return valid_models
+
+    except Exception:
+        pass
+
+    return fallback_models
+
+
+def is_ollama_running():
+
+    try:
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=1
+        )
+        return response.status_code == 200
+    except Exception:
+        return False
+
 
 def get_ollama_models():
 
@@ -288,17 +363,29 @@ def get_ollama_models():
 
 st.sidebar.subheader("LLM Settings")
 
+available_groq_models = get_groq_models(GROQ_API_KEY)
+
+selected_groq_model = st.sidebar.selectbox(
+    "Primary Groq Model",
+    options=available_groq_models,
+    index=0,
+    help="Select the active LLM hosted on Groq."
+)
+
+ollama_available = is_ollama_running()
 
 enable_fallback = st.sidebar.checkbox(
     "Enable Ollama Local Fallback",
-    value=True
+    value=ollama_available,
+    help="Fallback to local Ollama if Groq is offline."
 )
-
 
 fallback_model = None
 
-
 if enable_fallback:
+
+    if not ollama_available:
+        st.sidebar.caption("⚠️ Ollama is offline (localhost:11434 not reachable).")
 
     ollama_models = get_ollama_models()
 
@@ -473,31 +560,36 @@ def get_vectorstore(
 
 @st.cache_resource
 def create_llm(
-    fallback_model=None
+    model_name=None,
+    fallback_model=None,
+    groq_api_key=None
 ):
 
+    target_model = (
+        model_name
+        or LLM_CONFIG["default_model"]
+    )
+
+    target_key = (
+        groq_api_key
+        or os.getenv("GROQ_API_KEY")
+    )
+
     primary_llm = ChatGroq(
-
-        model=
-            LLM_CONFIG[
-                "default_model"
-            ],
-
+        model=target_model,
+        groq_api_key=target_key,
         temperature=
             LLM_CONFIG[
                 "temperature"
             ],
-
         max_tokens=
             LLM_CONFIG[
                 "max_tokens"
             ],
-
         timeout=
             LLM_CONFIG[
                 "timeout"
             ],
-
         max_retries=
             LLM_CONFIG[
                 "max_retries"
@@ -510,26 +602,19 @@ def create_llm(
         try:
 
             fallback_llm = OllamaLLM(
-
                 model=fallback_model,
-
                 temperature=
                     LLM_CONFIG[
                         "temperature"
                     ]
             )
 
-
             return primary_llm.with_fallbacks(
                 [fallback_llm]
             )
 
-
-        except Exception as e:
-
-            st.warning(
-                f"Ollama fallback unavailable: {e}"
-            )
+        except Exception:
+            pass
 
 
     return primary_llm
@@ -1597,28 +1682,34 @@ def get_rag_response(
     # 2. MULTI QUERY RETRIEVAL
     # --------------------------------------------------------
 
-    retriever = (
-        MultiQueryRetriever.from_llm(
-
-            retriever=
-                vectorstore.as_retriever(
-                    search_kwargs={
-                        "k": 5
-                    }
-                ),
-
-            llm=llm,
-
-            prompt=QUERY_PROMPT
+    try:
+        retriever = (
+            MultiQueryRetriever.from_llm(
+                retriever=
+                    vectorstore.as_retriever(
+                        search_kwargs={
+                            "k": 5
+                        }
+                    ),
+                llm=llm,
+                prompt=QUERY_PROMPT
+            )
         )
-    )
-
-
-    retrieved_docs = (
-        retriever.invoke(
+        retrieved_docs = (
+            retriever.invoke(
+                standalone_question
+            )
+        )
+    except Exception:
+        # Fallback to direct similarity search if MultiQuery LLM call fails
+        base_retriever = vectorstore.as_retriever(
+            search_kwargs={
+                "k": 5
+            }
+        )
+        retrieved_docs = base_retriever.invoke(
             standalone_question
         )
-    )
 
 
     # --------------------------------------------------------
@@ -1836,7 +1927,9 @@ if prompt:
 
             llm_instance = (
                 create_llm(
-                    fallback_model
+                    model_name=selected_groq_model,
+                    fallback_model=fallback_model,
+                    groq_api_key=GROQ_API_KEY
                 )
             )
 
@@ -1887,25 +1980,36 @@ if prompt:
             # RAG
             # ------------------------------------------------
 
-            (
-                response,
-                retrieved_docs,
-                standalone_question,
-                is_contextual
-            ) = get_rag_response(
+            try:
 
-                prompt,
+                (
+                    response,
+                    retrieved_docs,
+                    standalone_question,
+                    is_contextual
+                ) = get_rag_response(
 
-                st.session_state.messages[
-                    :-1
-                ],
+                    prompt,
 
-                llm_instance,
+                    st.session_state.messages[
+                        :-1
+                    ],
 
-                vectorstore,
+                    llm_instance,
 
-                tinybert_reranker
-            )
+                    vectorstore,
+
+                    tinybert_reranker
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"⚠️ Error generating response from Groq: {e}\n\n"
+                    "Tip: You can switch to another Groq model (e.g. `openai/gpt-oss-20b` or `qwen/qwen3.6-27b`) from the sidebar."
+                )
+
+                st.stop()
 
 
             elapsed_time = (

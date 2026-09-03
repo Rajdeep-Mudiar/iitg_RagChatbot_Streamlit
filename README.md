@@ -1,6 +1,6 @@
 # RAG Chatbot with Multi-Query Retrieval and TinyBERT Reranking
 
-An advanced Retrieval-Augmented Generation (RAG) chatbot built with Streamlit, LangChain, Groq (Llama 3.3 70B), and local embedding & reranking models.
+An advanced Retrieval-Augmented Generation (RAG) chatbot built with Streamlit, LangChain, Groq (OpenAI GPT-OSS / Qwen), and local embedding & reranking models.
 
 This chatbot includes a self-contained web interface for document ingestion (supporting PDF, TXT, and MD files), automated chunking, vector storage with FAISS, multi-query expansion to improve retrieval recall, and cross-encoder reranking to select the most relevant contexts before sending them to the LLM.
 
@@ -28,7 +28,7 @@ flowchart TD
     subgraph RAGPipeline["3. Query & Retrieval Pipeline"]
         I[User Query + Chat History] --> Condense[Query Condensation LLM Step<br/>Resolves pronouns & reformulates to standalone query]
         Condense --> J[MultiQueryRetriever]
-        J --> K[LLM: Llama-3.3-70b-versatile<br/>Generates 3 query variations]
+        J --> K[LLM: Active Groq Model<br/>Generates 3 query variations]
         K --> L[Retrieve Top Documents for all variations from FAISS]
         L --> M[Union & Deduplicate Retrieved Documents]
         M --> N[TinyBERT Cross-Encoder Reranker<br/>cross-encoder/ms-marco-TinyBERT-L-2-v2]
@@ -38,7 +38,7 @@ flowchart TD
 
     subgraph Generation["4. LLM Generation"]
         P --> Q[Construct Prompt with Context + LaTeX/Code rules]
-        Q --> R[LLM: Llama-3.3-70b-versatile<br/>with Ollama Fallback]
+        Q --> R[LLM: Groq Model e.g. openai/gpt-oss-120b<br/>with Ollama Fallback]
         R --> S[Generate Answer]
         S --> T[Render Answer & Expandable Source Contexts]
     end
@@ -55,7 +55,7 @@ flowchart TD
 - **Vector Database**: `FAISS` (Facebook AI Similarity Search) manages the index for fast local vector retrieval.
 - **Reranker**: `cross-encoder/ms-marco-TinyBERT-L-2-v2` (loaded locally via `sentence_transformers.CrossEncoder`, keeping top **5** context chunks).
 - **LLM Model**:
-  - **Primary**: `llama-3.3-70b-versatile` (hosted via the Groq API).
+  - **Primary**: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.6-27b` (hosted via the Groq API, selectable in UI).
   - **Local Fallback**: Local Ollama instances (e.g., `llama3.2:1b`, `gemma3:1b`, or `qwen2.5-coder:7b`) are automatically selected if the primary API fails.
 - **Query Optimization Techniques**:
   1. **Contextual Query Condensation / Reformulation**: A custom LLM prompt analyzes the conversation history and the follow-up question. If pronouns (like "it", "they", "this") or vague references are found, it reformulates the prompt into a standalone question.
@@ -105,7 +105,7 @@ The system operates across four primary pipeline stages, detailed step-by-step b
 
 - **Context Construction**: The page content of the Top 5 reranked chunks is concatenated into a single cohesive context block.
 - **System Prompt Grounding**: The query and context block are formatted into a system-guided template instructing the LLM to use **only** the provided context and say "I don't know" if the answer cannot be found. Custom rules enforce formatting math in LaTeX (`$`/`$$`) and code in markdown blocks.
-- **LLM Invocation**: The formatted prompt is sent to `llama-3.3-70b-versatile` (or the local fallback model via Ollama if the Groq API fails).
+- **LLM Invocation**: The formatted prompt is sent to the selected Groq model (e.g., `openai/gpt-oss-120b`, or the local fallback model via Ollama if enabled).
 - **UI Display**: The generated answer is streamed/printed to the Streamlit chat window. The metadata and content of the source chunks are displayed inside an expandable UI component below the chat bubble.
 
 ---

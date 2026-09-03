@@ -89,7 +89,7 @@ graph TB
 | **Reranking Model** | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | Loaded locally via SentenceTransformers CrossEncoder | Re-scoring retrieved chunks against the query to ensure high relevance. |
 | **Guardrails Filter** | LLM-based custom prompt | Temperature: 0.0, strict categorization | Inspecting user input for security and topical relevance. |
 | **Graphing Module** | `matplotlib` | Custom JSON extraction prompt, Matplotlib rendering | Automatically plotting data retrieved from chunks. |
-| **Primary LLM** | Groq (`llama-3.3-70b-versatile`) | Temperature: 0.0 / 0.1, system-grounding prompt | Query condensation, query expansion, graph data extraction, and response generation. |
+| **Primary LLM** | Groq (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.6-27b`) | Temperature: 0.0 / 0.1, system-grounding prompt | Query condensation, query expansion, graph data extraction, and response generation. |
 | **Fallback LLM** | Ollama (Local) | Auto-detects local running models | Fallback LLM when API is offline or rates are limited. |
 | **Observability** | LangSmith | `LANGSMITH_TRACING=true` via environment variables | Logging, tracking, and debugging RAG pipeline steps. |
 
