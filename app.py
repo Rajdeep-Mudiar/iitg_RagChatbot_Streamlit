@@ -36,14 +36,26 @@ from sentence_transformers import CrossEncoder
 load_dotenv()
 
 
+def is_truthy(val) -> bool:
+    """Safely check if a config value is truthy (handles bool, str, int)."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val != 0
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "1", "yes", "on", "t")
+    return bool(val)
+
+
 def get_config_value(key: str, default: str = None) -> str:
     """Safely get config from os.environ or st.secrets."""
     val = os.getenv(key)
     if val:
-        return val
+        return str(val)
     try:
         if hasattr(st, "secrets") and key in st.secrets:
-            return st.secrets[key]
+            secret_val = st.secrets[key]
+            return secret_val if isinstance(secret_val, bool) else str(secret_val)
     except Exception:
         pass
     return default
@@ -51,7 +63,7 @@ def get_config_value(key: str, default: str = None) -> str:
 
 GROQ_API_KEY = get_config_value("GROQ_API_KEY")
 if GROQ_API_KEY:
-    os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+    os.environ["GROQ_API_KEY"] = str(GROQ_API_KEY)
 
 
 # LANGSMITH CONFIGURATION
@@ -75,15 +87,18 @@ LANGSMITH_PROJECT = get_config_value(
     "IIT_Streamlit_RAG_Chatbot"
 )
 
-if LANGSMITH_TRACING and LANGSMITH_TRACING.lower() == "true":
+if is_truthy(LANGSMITH_TRACING):
 
     os.environ["LANGSMITH_TRACING"] = "true"
 
     if LANGSMITH_API_KEY:
-        os.environ["LANGSMITH_API_KEY"] = LANGSMITH_API_KEY
+        os.environ["LANGSMITH_API_KEY"] = str(LANGSMITH_API_KEY)
 
-    os.environ["LANGSMITH_ENDPOINT"] = LANGSMITH_ENDPOINT
-    os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT
+    if LANGSMITH_ENDPOINT:
+        os.environ["LANGSMITH_ENDPOINT"] = str(LANGSMITH_ENDPOINT)
+
+    if LANGSMITH_PROJECT:
+        os.environ["LANGSMITH_PROJECT"] = str(LANGSMITH_PROJECT)
 
 
 
@@ -205,8 +220,7 @@ st.sidebar.title("Settings")
 st.sidebar.subheader("LangSmith")
 
 if (
-    LANGSMITH_TRACING
-    and LANGSMITH_TRACING.lower() == "true"
+    is_truthy(LANGSMITH_TRACING)
     and LANGSMITH_API_KEY
 ):
 
