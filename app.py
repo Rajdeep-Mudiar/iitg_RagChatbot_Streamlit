@@ -932,6 +932,89 @@ Original question:
 
 
 # ============================================================
+# FORMULA / LATEX FORMATTER
+# ============================================================
+
+def format_latex_formulas(text: str) -> str:
+    """
+    Post-processes LLM text to ensure mathematical expressions and LaTeX formulas
+    are correctly formatted with standard Streamlit / KaTeX delimiters ($...$ and $$...$$).
+    """
+    if not text:
+        return text
+
+    # Split markdown code blocks so code snippets are never modified
+    blocks = text.split("```")
+    for i in range(0, len(blocks), 2):
+        chunk = blocks[i]
+
+        # 1. Convert LaTeX environments (\begin{equation}...\end{equation}, \begin{align}...\end{align}, etc.)
+        chunk = re.sub(
+            r"\\begin\{(?:equation\*?|align\*?|gather\*?|multline\*?)\}\s*([\s\S]*?)\s*\\end\{(?:equation\*?|align\*?|gather\*?|multline\*?)\}",
+            lambda m: f"\n\n$$\n{m.group(1).strip()}\n$$\n\n",
+            chunk
+        )
+
+        # 2. Normalize explicit LaTeX block delimiters \[ ... \] or \\[ ... \\] -> $$ ... $$
+        chunk = re.sub(
+            r"(?:\\{1,2}\[\s*)([\s\S]*?)(?:\s*\\{1,2}\])",
+            lambda m: f"\n\n$$\n{m.group(1).strip()}\n$$\n\n",
+            chunk
+        )
+
+        # 3. Normalize explicit LaTeX inline delimiters \( ... \) or \\( ... \\) -> $ ... $
+        chunk = re.sub(
+            r"(?:\\{1,2}\(\s*)([\s\S]*?)(?:\s*\\{1,2}\))",
+            lambda m: f"${m.group(1).strip()}$",
+            chunk
+        )
+
+        # 4. Handle square-bracketed math (e.g. [ Q = \frac{e_{\text{total}}}{G_{\text{total}}} ])
+        def fix_bracket_formula(m):
+            inner = m.group(1).strip()
+            math_markers = [
+                "\\frac", "\\text", "\\sum", "\\int", "\\sqrt",
+                "\\alpha", "\\beta", "\\gamma", "\\sigma", "\\lambda",
+                "\\mu", "\\pi", "\\theta", "\\omega", "\\Delta",
+                "\\nabla", "\\partial", "\\cdot", "\\times", "\\pm",
+                "\\leq", "\\geq", "\\neq", "\\approx", "\\in", "\\infty",
+                "_{", "^{"
+            ]
+            if any(marker in inner for marker in math_markers):
+                if "\n" in inner or len(inner) > 15 or "\\frac" in inner or "\\sum" in inner or "\\int" in inner or "=" in inner:
+                    return f"\n\n$$\n{inner}\n$$\n\n"
+                return f"${inner}$"
+            return m.group(0)
+
+        chunk = re.sub(
+            r"\[\s*([^\[\]\n]+?)\s*\]",
+            fix_bracket_formula,
+            chunk
+        )
+
+        # 5. Handle inline variables / terms wrapped in parentheses containing LaTeX syntax (e.g. (e_{\text{total}}))
+        def fix_paren_formula(m):
+            inner = m.group(1).strip()
+            if any(marker in inner for marker in ["\\", "_{", "^{"]):
+                return f"${inner}$"
+            return m.group(0)
+
+        chunk = re.sub(
+            r"\(\s*([^\n()]+?)\s*\)",
+            fix_paren_formula,
+            chunk
+        )
+
+        # 6. Clean up extra blank lines around $$ blocks
+        chunk = re.sub(r"\n{3,}\$\$", "\n\n$$", chunk)
+        chunk = re.sub(r"\$\$\n{3,}", "$$\n\n", chunk)
+
+        blocks[i] = chunk
+
+    return "```".join(blocks)
+
+
+# ============================================================
 # RAG PROMPT
 # ============================================================
 
@@ -951,7 +1034,13 @@ Rules:
 
    "I don't know based on the provided documents."
 
-4. Mathematical equations must use LaTeX.
+4. Mathematical and formula formatting rules:
+   - For standalone/block equations, format in LaTeX wrapped in double dollar signs on their own lines:
+     $$
+     \text{equation}
+     $$
+   - For inline variables, terms, and expressions, format in LaTeX wrapped in single dollar signs: $x$, $e_{\text{total}}$, $G_{\text{total}}$.
+   - Do NOT use square brackets [ ... ] or parentheses ( ... ) for mathematical formulas.
 
 5. Code must use markdown code blocks.
 
@@ -1851,6 +1940,8 @@ def get_rag_response(
         "question":
             standalone_question
     })
+
+    answer = format_latex_formulas(answer)
 
 
     return (
