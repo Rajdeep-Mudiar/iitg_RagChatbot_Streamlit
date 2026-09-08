@@ -46,6 +46,9 @@
   <!-- Reading Progress Bar -->
   <div id="progress-bar"></div>
 
+  <!-- Mobile Menu Backdrop Overlay -->
+  <div class="mobile-menu-overlay" id="mobile-menu-overlay"></div>
+
   <!-- =========================================================================
        Sticky Navigation Bar
        ========================================================================= -->
@@ -53,8 +56,8 @@
     <div class="container navbar-container">
       <a href="#hero" class="brand-logo" id="brand-link">
         <div class="brand-icon">IIT</div>
-        <div>
-          <span>IITG RAG Chatbot</span>
+        <div class="brand-text-group">
+          <span class="brand-title">IITG RAG Chatbot</span>
           <span class="brand-badge">Summer '26</span>
         </div>
       </a>
@@ -86,7 +89,7 @@
           </span>
         </button>
 
-        <a href="https://iitg-rag-chatbot.streamlit.app/" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm" id="nav-app-btn">
+        <a href="https://iitg-rag-chatbot.streamlit.app/" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm nav-app-btn" id="nav-app-btn">
           <span>Live App</span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
@@ -95,12 +98,10 @@
           </svg>
         </a>
 
-        <button class="mobile-toggle-btn" id="mobile-toggle-btn" aria-label="Open Mobile Menu">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-          </svg>
+        <button class="mobile-toggle-btn" id="mobile-toggle-btn" aria-label="Toggle Navigation Menu" aria-expanded="false">
+          <span class="hamburger-bar top"></span>
+          <span class="hamburger-bar mid"></span>
+          <span class="hamburger-bar bot"></span>
         </button>
       </div>
     </div>
@@ -378,13 +379,23 @@
 
       <div class="architecture-container">
         <!-- Interactive Step Selector Buttons -->
-        <div class="pipeline-steps-nav">
+        <div class="pipeline-steps-nav" id="pipeline-steps-nav">
           <button class="pipeline-step-btn active" data-step="0">1. Ingestion</button>
           <button class="pipeline-step-btn" data-step="1">2. Chunking & Index</button>
           <button class="pipeline-step-btn" data-step="2">3. Guardrails</button>
           <button class="pipeline-step-btn" data-step="3">4. Multi-Query</button>
           <button class="pipeline-step-btn" data-step="4">5. TinyBERT Rerank</button>
           <button class="pipeline-step-btn" data-step="5">6. Generation & Graph</button>
+        </div>
+
+        <!-- Mobile Scroll / Swipe Hint -->
+        <div class="arch-swipe-hint">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8L22 12L18 16"></path>
+            <path d="M6 8L2 12L6 16"></path>
+            <line x1="2" y1="12" x2="22" y2="12"></line>
+          </svg>
+          <span>Scroll horizontally or tap nodes to explore pipeline</span>
         </div>
 
         <!-- SVG Visual Diagram -->
@@ -1264,6 +1275,21 @@ def format_latex_formulas(text: str) -> str:
       </div>
     </div>
   </footer>
+
+  <!-- Floating Back-to-Top & Quick Action Controls -->
+  <div class="floating-actions" id="floating-actions">
+    <a href="https://iitg-rag-chatbot.streamlit.app/" target="_blank" rel="noopener noreferrer" class="floating-btn floating-app-btn" title="Launch Live App" aria-label="Launch Live App">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+      </svg>
+      <span>Live App</span>
+    </a>
+    <button class="floating-btn floating-top-btn" id="floating-top-btn" title="Back to Top" aria-label="Back to Top">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="18 15 12 9 6 15"></polyline>
+      </svg>
+    </button>
+  </div>
 
   <!-- Toast Message Element -->
   <div class="toast-msg" id="toast">Copied to clipboard!</div>

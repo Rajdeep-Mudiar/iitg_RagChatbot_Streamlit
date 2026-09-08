@@ -1,6 +1,6 @@
 /**
  * IIT Guwahati - Multimodal Broadcast Analytics System RAG Chatbot
- * Interactive Scripts (script.js)
+ * Interactive Scripts & Mobile Optimizations (script.js)
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -12,6 +12,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initCopyCodeButtons();
   initBenchmarkAnimations();
   initScrollSpy();
+  initFloatingActions();
+  initMathScrollOptimization();
 });
 
 /* --------------------------------------------------------------------------
@@ -74,29 +76,69 @@ function initReadingProgressBar() {
     const totalHeight = document.documentElement.scrollHeight - window.innerHeight;
     const progress = totalHeight > 0 ? (window.pageYOffset / totalHeight) * 100 : 0;
     progressBar.style.width = `${progress}%`;
-  });
+  }, { passive: true });
 }
 
 /* --------------------------------------------------------------------------
-   3. Mobile Menu Toggle
+   3. Mobile Menu Toggle, Overlay & Body Lock
    -------------------------------------------------------------------------- */
 function initMobileMenu() {
   const mobileToggleBtn = document.getElementById('mobile-toggle-btn');
   const navMenu = document.getElementById('nav-menu');
+  const overlay = document.getElementById('mobile-menu-overlay');
 
-  if (mobileToggleBtn && navMenu) {
-    mobileToggleBtn.addEventListener('click', () => {
-      navMenu.classList.toggle('mobile-open');
-    });
+  if (!mobileToggleBtn || !navMenu) return;
 
-    // Close menu when clicking any nav link
-    const navLinks = navMenu.querySelectorAll('.nav-link');
-    navLinks.forEach(link => {
-      link.addEventListener('click', () => {
-        navMenu.classList.remove('mobile-open');
-      });
+  function toggleMenu(isOpen) {
+    const shouldOpen = isOpen !== undefined ? isOpen : !navMenu.classList.contains('mobile-open');
+    
+    if (shouldOpen) {
+      navMenu.classList.add('mobile-open');
+      mobileToggleBtn.classList.add('open');
+      mobileToggleBtn.setAttribute('aria-expanded', 'true');
+      if (overlay) overlay.classList.add('active');
+      document.body.classList.add('menu-locked');
+    } else {
+      navMenu.classList.remove('mobile-open');
+      mobileToggleBtn.classList.remove('open');
+      mobileToggleBtn.setAttribute('aria-expanded', 'false');
+      if (overlay) overlay.classList.remove('active');
+      document.body.classList.remove('menu-locked');
+    }
+  }
+
+  mobileToggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMenu();
+  });
+
+  if (overlay) {
+    overlay.addEventListener('click', () => {
+      toggleMenu(false);
     });
   }
+
+  // Close menu when clicking any nav link
+  const navLinks = navMenu.querySelectorAll('.nav-link');
+  navLinks.forEach(link => {
+    link.addEventListener('click', () => {
+      toggleMenu(false);
+    });
+  });
+
+  // Close menu on Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && navMenu.classList.contains('mobile-open')) {
+      toggleMenu(false);
+    }
+  });
+
+  // Close menu on resize back to desktop
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 768 && navMenu.classList.contains('mobile-open')) {
+      toggleMenu(false);
+    }
+  }, { passive: true });
 }
 
 /* --------------------------------------------------------------------------
@@ -175,6 +217,7 @@ function initArchitectureExplorer() {
   const detailTech = document.getElementById('step-detail-tech');
   const detailOutput = document.getElementById('step-detail-output');
   const detailMetric = document.getElementById('step-detail-metric');
+  const stepNav = document.getElementById('pipeline-steps-nav');
 
   function updateActiveStep(stepIndex) {
     const stepData = architectureSteps[stepIndex];
@@ -182,7 +225,12 @@ function initArchitectureExplorer() {
 
     // Update buttons
     stepButtons.forEach((btn, idx) => {
-      btn.classList.toggle('active', idx === stepIndex);
+      const isActive = idx === stepIndex;
+      btn.classList.toggle('active', isActive);
+      if (isActive && stepNav) {
+        // Scroll button into view smoothly on mobile horizontally
+        btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      }
     });
 
     // Update SVG nodes
@@ -225,6 +273,7 @@ function initArchitectureExplorer() {
 function initCodeTabs() {
   const tabButtons = document.querySelectorAll('.code-tab-btn');
   const tabPanels = document.querySelectorAll('.code-content-panel');
+  const tabsHeader = document.querySelector('.code-tabs-header');
 
   tabButtons.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -237,6 +286,10 @@ function initCodeTabs() {
       const activePanel = document.getElementById(targetId);
       if (activePanel) {
         activePanel.classList.add('active');
+      }
+
+      if (tabsHeader) {
+        btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
       }
     });
   });
@@ -299,7 +352,7 @@ function initBenchmarkAnimations() {
         observer.unobserve(fill);
       }
     });
-  }, { threshold: 0.2 });
+  }, { threshold: 0.15 });
 
   bars.forEach(bar => {
     bar.style.width = '0%';
@@ -311,7 +364,7 @@ function initBenchmarkAnimations() {
    8. ScrollSpy Navigation
    -------------------------------------------------------------------------- */
 function initScrollSpy() {
-  const sections = document.querySelectorAll('section[id]');
+  const sections = document.querySelectorAll('section[id], header[id]');
   const navLinks = document.querySelectorAll('.nav-link');
 
   window.addEventListener('scroll', () => {
@@ -332,5 +385,42 @@ function initScrollSpy() {
         link.classList.add('active');
       }
     });
+  }, { passive: true });
+}
+
+/* --------------------------------------------------------------------------
+   9. Floating Action Controls (Back to Top & Live App)
+   -------------------------------------------------------------------------- */
+function initFloatingActions() {
+  const floatingActions = document.getElementById('floating-actions');
+  const floatingTopBtn = document.getElementById('floating-top-btn');
+
+  if (!floatingActions) return;
+
+  window.addEventListener('scroll', () => {
+    if (window.pageYOffset > 320) {
+      floatingActions.classList.add('show');
+    } else {
+      floatingActions.classList.remove('show');
+    }
+  }, { passive: true });
+
+  if (floatingTopBtn) {
+    floatingTopBtn.addEventListener('click', () => {
+      window.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      });
+    });
+  }
+}
+
+/* --------------------------------------------------------------------------
+   10. Math Formula Scroll Hint & Mobile Interaction
+   -------------------------------------------------------------------------- */
+function initMathScrollOptimization() {
+  const mathBoxes = document.querySelectorAll('.math-formula-box');
+  mathBoxes.forEach(box => {
+    box.addEventListener('touchstart', () => {}, { passive: true });
   });
 }
