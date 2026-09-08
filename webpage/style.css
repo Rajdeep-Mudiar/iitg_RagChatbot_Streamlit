@@ -1066,6 +1066,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
   transition: all var(--transition-base);
 }
 
@@ -1107,11 +1110,67 @@ button {
   background: var(--bg-code);
   border: 1px solid var(--border-prominent);
   border-radius: var(--radius-md);
-  padding: 18px 16px;
-  text-align: center;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
+  padding: 18px 14px;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  -webkit-overflow-scrolling: touch !important;
+  touch-action: pan-x pan-y !important;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  position: relative;
+  scrollbar-width: thin;
+  scrollbar-color: var(--primary-border) rgba(255, 255, 255, 0.04);
+}
+
+.math-formula-box::-webkit-scrollbar {
+  height: 5px;
+  display: block;
+}
+
+.math-formula-box::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: var(--radius-full);
+}
+
+.math-formula-box::-webkit-scrollbar-thumb {
+  background: var(--primary-border);
+  border-radius: var(--radius-full);
+}
+
+.math-formula-box::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
+}
+
+/* KaTeX Elements Swiping & Formatting */
+.math-formula-box .katex-display {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  margin: 0 !important;
+  padding: 4px 6px !important;
+  width: max-content !important;
+  min-width: 100% !important;
+  overflow-x: visible !important;
+  overflow-y: hidden !important;
+  box-sizing: border-box !important;
+}
+
+.math-formula-box .katex {
   font-size: 1.05rem;
+  display: inline-block !important;
+  white-space: nowrap !important;
+  text-align: center;
+}
+
+.math-formula-box .katex-html {
+  display: inline-block !important;
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+
+.math-formula-box .katex .base {
+  white-space: nowrap !important;
 }
 
 .math-explanation {
@@ -1981,12 +2040,20 @@ button {
   }
 
   .math-card {
-    padding: 20px 16px;
+    padding: 20px 14px;
+    min-width: 0;
+    width: 100%;
   }
 
   .math-formula-box {
-    padding: 14px 10px;
-    font-size: 0.95rem;
+    padding: 16px 10px;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    touch-action: pan-x pan-y !important;
+  }
+
+  .math-formula-box .katex {
+    font-size: 1rem;
   }
 
   /* Code Tabs Mobile */
